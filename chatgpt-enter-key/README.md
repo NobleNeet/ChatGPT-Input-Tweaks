@@ -47,6 +47,8 @@ chatgpt-enter-key/
 - **IME 対策**: `event.isComposing`、`event.keyCode === 229`、
   `compositionstart`〜`compositionend` の自前フラグ、
   および `compositionend` 直後 100ms の猶予窓（変換確定 Enter を拾わない）の 4 段構え。
+- **不良検知ログ**: 操作結果を `console` に出す（`[ChatGPT Enter Key]` 接頭辞）。
+  通常タイピングでは無出力で、Enter 操作時・異常時のみ出力する。詳細は §4。
 
 ## 2. Vivaldi への読み込み手順
 
@@ -81,8 +83,53 @@ chatgpt-enter-key/
 - [ ] `Enter` 改行が ChatGPT 側の状態に反映され、送信時に改行として届く
 - [ ] `Ctrl+Z` などの Undo / Redo、ペースト後の改行が壊れない
 - [ ] ページ遷移（新規チャット・履歴選択）後もそのまま機能する
+- [ ] Console に `[ChatGPT Enter Key] v0.3.0 読み込み完了 ...` が 1 行だけ出ている（＝注入されている）
+- [ ] `Enter` 押下で `Enter → 改行（...）` が 1 行だけ追加され、**文章タイプ中は無出力**のまま
+- [ ] `localStorage.setItem('chatgptEnterKeyLogLevel','debug')` で素通し理由まで出る
+- [ ] `document.dispatchEvent(new CustomEvent('chatgptEnterKeySelfTest'))` で
+      入力欄が `accepted: true`、送信ボタンが `via: "selector"` になる
+      （`accepted: false` ばかり／`via: "none"` なら §5 の弱点＝セレクタ陳腐化）
 
-## 4. 既知の弱点
+## 4. コンソールログ（不良検知）
+
+DevTools（`F12`）→ Console に `[ChatGPT Enter Key]` 接頭辞で出力する。
+content script のログはページのコンソールに `content.js:行番号` 付きで表示される
+（見当たらない場合は Console 上部の JavaScript context セレクタで本拡張を選ぶ）。
+
+| レベル | 内容 |
+| --- | --- |
+| `info`（既定） | 読み込み完了 1 行（＝注入されている証明）／ `Enter → 改行` ／ `Ctrl+Enter → 送信ボタン click()` ／ 自己診断の結果 |
+| `warn` | 送信ボタンが見つからない／候補は有るが押下不可／名称一致フォールバックで送信した／入力欄を特定できない状態の反復／ IME フラグ滞留 |
+| `debug` | 素通しした理由（IME 変換中・Alt 併用・Shift+Enter・二重送信抑止・対象外要素） |
+
+**通常のタイピングでは 1 行も出ない。** 既定（`info`）で出力するのは、ページ読み込み時の 1 行と Enter を押した時だけ。
+
+```js
+// 詳細ログの有効化 / 無音化（ページのコンソールから。拡張の context 選択は不要）
+localStorage.setItem('chatgptEnterKeyLogLevel', 'debug');
+localStorage.setItem('chatgptEnterKeyLogLevel', 'off');
+localStorage.removeItem('chatgptEnterKeyLogLevel'); // 既定（info）に戻す
+
+// 「今この瞬間の DOM」で入力欄・送信ボタンが生きているか即検査
+document.dispatchEvent(new CustomEvent('chatgptEnterKeySelfTest'));
+```
+
+自己診断は入力欄セレクタ 5 種の当たり状況（`accepted`）と送信ボタンのヒット経路
+（`via`: `selector` / `name` / `disabled` / `none`）を 1 件のオブジェクトで返す。
+DevTools の context で本拡張を選べば `__chatgptEnterKeySelfTest()`（同じ内容）や
+`__chatgptEnterKeyStats()`（操作回数カウンタ）も直接呼べる。
+
+### 「効かない」ときの読み方
+
+| 症状 | ログの征兆 | 対応 |
+| --- | --- | --- |
+| そもそも効いていない | `v0.3.0 読み込み完了` が出ていない | タブを完全に閉じて開き直す／拡張が有効か／`chatgpt.com` か |
+| `Enter` で改行されない | `Enter` に対するログが 1 行も無い | 入力欄を特定できていない。自己診断で `accepted: false` ばかりなら `isComposerInput` の条件を更新 |
+| `Ctrl+Enter` で送信されない | `Ctrl+Enter: 送信ボタンが見つからず素通し` | 自己診断の `sendButton.via` が `none` なら `SEND_BUTTON_SELECTORS` に実 DOM のセレクタを追加 |
+| 送信はされるが warn 付き | `名称一致（aria-label / title 等）で送信しました` | セレクタ配列が死んでいる。上記追加でフォールバックを外す |
+| 変換確定直後だけおかしい | `compositionstart から N 秒経過` の warn | IME フラグ取りこぼし。入力欄外をクリック or ページ再読み込みで解消 |
+
+## 5. 既知の弱点
 
 - **DOM 依存**: `#prompt-textarea`、`#composer`、`data-testid="compose-send-button"` は ChatGPT の改版で変わると検出に失敗する。その場合 `Ctrl+Enter` は無害に素通しされ、`Enter` の改行化も効かないことがある。
 - **既定改行に頼っている**: `Enter` はブラウザ／エディタの既定動作に委ねているため、改版で既定動作そのものが潰されていると改行が増えない（その場合は `insertText` 系のフォールバック追加が必要）。
@@ -92,9 +139,11 @@ chatgpt-enter-key/
 - **例外範囲**: 入力欄判定の否定条件に無い UI（ダイアログ内の一部 textarea 等）で誤介入する可能性がある。逆に、厳格化しすぎると新 UI で効かなくなる。
 - **可視性判定の副作用**: 非表示 fallback を弾くのに `getClientRects()` / `checkVisibility()` を使っているため、描画されるがサイズ 0 の特殊な composer では判定が外れる可能性がある。
 - **`Ctrl+Enter` の探索範囲**: 誤クリック回避のため送信ボタンを「composer コンテナ → 編集域の直近の親」に限定。送信ボタンがより上位の祖先に移動すると検出に失敗する（その場合は無害に素通し）。
+- **ログの出力量**: 既定（`info`）でもページ読み込み時 1 行＋ `Enter` 1 回に 1 行出る。タイプのみの入力では無出力。入力テキスト・送信内容などの**内容は一切出力しない**（要素の tag / id / class / 属性要約のみ）。
+- **警告ヒューリスティクス**: 「入力欄を特定できない」警告は 10 秒以内に 4 回 Enter を押した時だけ 1 回出す。検索欄・CodeMirror・非表示 fallback など明示的に除外した要素は数えないが、除外に含まれない contenteditable を連打すると誤警告しうる（実害はなく、再読み込みや正常な Enter で条件は解除される）。
 - **testing**: 実際の DOM に対する自動テストは未実施（ブラウザ手動テストのみ）。
 
-## 5. 補足
+## 6. 補足
 
 - `chrome://` / `vivaldi://` / 拡張のオプションページなどでは動作しない（MV3 の content_scripts 仕様）。
 - 設定項目は意図的に無い。挙動を変えたい場合は `content.js` 冒頭の定数

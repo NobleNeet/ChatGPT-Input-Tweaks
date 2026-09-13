@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Enter Key",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "ChatGPT の入力欄で Enter=改行、Ctrl+Enter=送信 にします。IME 変換中の Enter には一切干渉しません。",
   "content_scripts": [
     {

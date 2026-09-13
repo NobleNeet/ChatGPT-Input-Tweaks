@@ -21,6 +21,9 @@
  *   - 送信ボタンが見つからない場合はイベントを素通しする（暴走防止）。
  *   - 入力欄は textarea ではなく ProseMirror の contenteditable div。
  *     生成された class 名（wcDTda_* 等）と aria-label には依存しない。
+ *   - 不良検知用のログを出す（既定 info / localStorage 'chatgptEnterKeyLogLevel' で切替）。
+ *     通常タイピングでは無出力。入力内容そのものは出力しない。
+ *     自己診断: document.dispatchEvent(new CustomEvent('chatgptEnterKeySelfTest'))
  */
 (() => {
   'use strict';
@@ -92,9 +95,84 @@
   // 候補に無かった場合の最終フォールバックで許す名称（"Stop" 等を誤クリックしないため）
   const SEND_NAME_RE = /send|submit|送信/i;
 
+  // ---- ログ（不良検知用） ----------------------------------------------------
+  // 既定 'info'。通常タイピングでは 1 行も出さず、Enter に対する操作結果と警告だけ出す。
+  // 'debug' に上げると、素通し・二重送信抑止・IME スキップまで記録する。
+  //   変更（ページの console から）:
+  //     localStorage.setItem('chatgptEnterKeyLogLevel', 'debug')   // 詳細
+  //     localStorage.setItem('chatgptEnterKeyLogLevel', 'off')     // 無音
+  //   自己診断（セレクタが生きているか等）:
+  //     document.dispatchEvent(new CustomEvent('chatgptEnterKeySelfTest'))
+  const VERSION = '0.3.0';
+  const LOG_TAG = '[ChatGPT Enter Key]';
+  const LOG_STORAGE_KEY = 'chatgptEnterKeyLogLevel';
+  const SELF_TEST_EVENT = 'chatgptEnterKeySelfTest';
+
+  function logLevel() {
+    let level = 'info';
+    if (typeof window.__chatgptEnterKeyLogLevel === 'string') {
+      level = window.__chatgptEnterKeyLogLevel; // console からの上書き
+    } else {
+      try {
+        const stored = window.localStorage && window.localStorage.getItem(LOG_STORAGE_KEY);
+        if (stored) level = stored;
+      } catch (_) {
+        /* localStorage 使えなくても無視 */
+      }
+    }
+    return level === 'off' || level === 'debug' ? level : 'info';
+  }
+
+  function logInfo(...args) {
+    if (logLevel() !== 'off' && typeof console.info === 'function') console.info(LOG_TAG, ...args);
+  }
+  function logWarn(...args) {
+    if (logLevel() !== 'off' && typeof console.warn === 'function') console.warn(LOG_TAG, ...args);
+  }
+  function logDebug(...args) {
+    if (logLevel() === 'debug' && typeof console.debug === 'function') console.debug(LOG_TAG, ...args);
+  }
+
+  // 要素を 1 行で説明（生成 class 名も参考情報として出す＝判定には使わない）
+  function describeTarget(el) {
+    if (!el) return String(el);
+    if (el === document) return '#document';
+    if (typeof el.getAttribute !== 'function') return String(el.tagName || el);
+    const parts = [String(el.tagName).toLowerCase()];
+    if (el.id) parts.push('#' + el.id);
+    const cls = String(el.className || '')
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 3);
+    if (cls.length) parts.push('.' + cls.join('.'));
+    for (const attr of ['role', 'aria-multiline', 'name', 'contenteditable', 'type', 'data-testid']) {
+      const v = el.getAttribute(attr);
+      if (v) parts.push('[' + attr + '=' + v + ']');
+    }
+    if (el.isContentEditable === true) parts.push('[editable]');
+    return parts.join('');
+  }
+
+  // 動作回数と異常検知
+  const stats = {
+    enterNewline: 0, // Enter を改行に転換した回数
+    send: 0, // 送信ボタンを click() した回数
+    imeSkip: 0, // IME 変換中などで素通しした回数
+    altSkip: 0,
+    shiftPassthrough: 0,
+    nonComposerEnter: 0, // 編集域だったが composer と特定できなかった回数
+    noSendButton: 0,
+    guarded: 0,
+  };
+  const recentMisses = []; // 直近の「特定できなかった Enter」の時刻
+  let warnedDetection = false;
+  let warnedStuckComposition = false;
+
   // ---- IME 状態 ------------------------------------------------------------
 
   let isComposingNow = false;
+  let compositionStartedAt = -Infinity; // 滞留検知用（compositionstart の時刻）
   let compositionEndedAt = -Infinity;
 
   // 入力欄の判定より先に調べる（IME 中は常に素通しが最優先）
@@ -190,7 +268,7 @@
     // 肯定条件 4: 旧 textarea 構成向け。可視かつ「送信らしきボタンのある form」に限る
     if (isTextControl) {
       const scope = el.closest('form') || (isInsideComposer(el) ? el.parentElement : null);
-      return Boolean(scope) && findSendButton(scope) !== null;
+      return Boolean(scope) && findSendButton(scope).button !== null;
     }
     return false;
   }
@@ -237,8 +315,11 @@
       .join(' ');
   }
 
+  // 戻り値: { button, via } / via = 'selector' | 'name' | 'disabled' | 'none' | 'no-scope'
   function findSendButton(scope) {
-    if (!scope) return null;
+    if (!scope) return { button: null, via: 'no-scope' };
+
+    let sawDisabled = null;
 
     for (const selector of SEND_BUTTON_SELECTORS) {
       let node = null;
@@ -254,52 +335,175 @@
           ? node
           : node.closest('button, [role="button"]') ||
             node.querySelector('button, [role="button"]');
-      if (isEnabledButton(btn)) return btn;
+      if (isEnabledButton(btn)) return { button: btn, via: 'selector', selector };
+      // 候補要素自体は見つかっているが押下不可（生成中・空欄など）。他候補は続ける
+      if (btn) sawDisabled = sawDisabled || selector;
     }
 
     // 名称一致に限定した最終フォールバック
     const buttons = Array.from(scope.querySelectorAll('button')).filter(isEnabledButton);
-    return buttons.find((btn) => SEND_NAME_RE.test(labelOf(btn))) || null;
+    const byName = buttons.find((btn) => SEND_NAME_RE.test(labelOf(btn))) || null;
+    if (byName) return { button: byName, via: 'name' };
+    return { button: null, via: sawDisabled ? 'disabled' : 'none', selector: sawDisabled };
   }
 
   let lastSendAt = -Infinity;
 
+  // 戻り値: 'sent'（click 済み）| 'guarded'（連打抑止で何もしない）
   function sendWith(button, event) {
     const now = typeof event.timeStamp === 'number' ? event.timeStamp : Date.now();
     // 連打・キーリピートによる二重送信を防ぐ
-    if (now - lastSendAt < SEND_GUARD_MS) return;
+    if (now - lastSendAt < SEND_GUARD_MS) return 'guarded';
     lastSendAt = now;
 
     // ChatGPT 側に Enter を渡さず、既定の改行挿入も止めてから click() する
     event.preventDefault();
     event.stopPropagation();
     button.click();
+    return 'sent';
+  }
+
+  // ---- 不良検知 -------------------------------------------------------------
+
+  // 「編集域なのに composer と特定できなかった Enter」が短時間に続けば、
+  // 改版でセレクタが死んだ疑いがあるので 1 回だけ警告する（成功すれば再武装）。
+  // 検索欄・CodeMirror など明示的に除外した要素は数えない（正常な素通しのため）。
+  function noteNonComposer(editable, event) {
+    if (!editable) return; // 編集域自体が無い通常ページ内 Enter は数えない
+    if (editable.matches(EXCLUDED_SELECTOR) || editable.closest(EXCLUDED_SELECTOR)) return;
+
+    stats.nonComposerEnter += 1;
+
+    const now = typeof event.timeStamp === 'number' ? event.timeStamp : 0;
+    recentMisses.push(now);
+    while (recentMisses.length > 8) recentMisses.shift();
+    if (warnedDetection || recentMisses.length < 4) return;
+
+    const span = now - recentMisses[0];
+    if (!(span >= 0 && span <= 10000)) return;
+    warnedDetection = true;
+
+    logWarn(
+      '約 ' +
+        Math.round(span / 1000) +
+        ' 秒間に ' +
+        recentMisses.length +
+        ' 回 Enter を押しましたが、入力欄を composer として特定できませんでした。',
+      '入力欄の構造が改版で変わった可能性があります（現行条件: ' +
+        '#prompt-textarea かつ rich / contenteditable+role=textbox+aria-multiline=true / composer コンテナ配下の rich editable）。',
+      {
+        target: describeTarget(event.target),
+        nearestEditable: describeTarget(editable),
+      },
+      '自己診断は: document.dispatchEvent(new CustomEvent("' + SELF_TEST_EVENT + '"))'
+    );
+  }
+
+  // compositionstart ばかりで compositionend が届かない（IME フラグ滞留）と
+  // Enter がずっと変換確定扱いになるため、長時間化したら警告する。
+  function maybeWarnStuckComposition(event) {
+    if (warnedStuckComposition || !isComposingNow || compositionStartedAt < 0) return;
+    const now = typeof event.timeStamp === 'number' ? event.timeStamp : 0;
+    const elapsed = now - compositionStartedAt;
+    if (!(elapsed > 5000)) return;
+    warnedStuckComposition = true;
+    logWarn(
+      'IME の compositionstart から ' +
+        Math.round(elapsed / 1000) +
+        ' 秒経過しています。compositionend が届いていない可能性があり、Enter が変換確定扱いのまま素通され続けます。',
+      '解消するには入力欄の外をクリックするか、ページを再読み込みしてください。'
+    );
   }
 
   // ---- keydown ハンドラ ---------------------------------------------------
 
   function handleKeyDown(event) {
     if (event.key !== 'Enter') return;
-    if (event.defaultPrevented === true) return;
+
+    if (event.defaultPrevented === true) {
+      logDebug('Enter: 他のハンドラが既に preventDefault 済み → 非干渉');
+      return;
+    }
 
     const editable = findEditableAncestor(event.target);
-    if (!editable || !isComposerInput(editable)) return; // 入力欄以外は無関係
+    const isComposer = Boolean(editable) && isComposerInput(editable);
+
+    if (!isComposer) {
+      noteNonComposer(editable, event); // 必要なら warn
+      logDebug('Enter: 対象外（入力欄と特定できず）→ 非干渉', {
+        target: describeTarget(event.target),
+        editable: describeTarget(editable),
+      });
+      return;
+    }
+
+    // ここまで通った＝入力欄の検知は生きている。警告条件を解除する
+    recentMisses.length = 0;
+    warnedDetection = false;
 
     // IME 変換中（およびその直後）は絶対に触らない
-    if (isImeActive(event)) return;
+    if (isImeActive(event)) {
+      stats.imeSkip += 1;
+      maybeWarnStuckComposition(event);
+      logDebug('Enter: IME 変換中 → 非干渉', { isComposingNow, compositionStartedAt });
+      return;
+    }
 
     // Alt（AltGraph 含む）が混ざるものは原則として素通し
-    if (event.altKey) return;
+    if (event.altKey) {
+      stats.altSkip += 1;
+      logDebug('Enter: Alt 併用 → 素通し');
+      return;
+    }
 
     // Ctrl+Enter / Cmd+Enter: 送信ボタンを見つけて click()
     if (event.ctrlKey || event.metaKey) {
-      const button = findSendButton(composerScopeOf(editable));
-      if (button) sendWith(button, event);
-      return; // 見つからなければ素通し
+      const scope = composerScopeOf(editable);
+      const found = findSendButton(scope);
+
+      if (!found.button) {
+        stats.noSendButton += 1;
+        logWarn(
+          'Ctrl+Enter: 送信ボタンが見つからず素通ししました。' +
+            (found.via === 'disabled'
+              ? '候補ボタンは存在しましたが押下不可でした（生成中・空欄など）。'
+              : '送信ボタンのセレクタが改版で変わった可能性があります。'),
+          {
+            via: found.via,
+            selector: found.selector || null,
+            scope: describeTarget(scope),
+          },
+          '自己診断は: document.dispatchEvent(new CustomEvent("' + SELF_TEST_EVENT + '"))'
+        );
+        return;
+      }
+
+      if (found.via === 'name') {
+        logWarn(
+          'Ctrl+Enter: 候補セレクタに無いため名称一致（aria-label / title 等）で送信しました。セレクタ更新が必要です。',
+          { button: describeTarget(found.button) }
+        );
+      }
+
+      if (sendWith(found.button, event) === 'guarded') {
+        stats.guarded += 1;
+        logDebug('Ctrl+Enter: ' + SEND_GUARD_MS + 'ms 未満のため二重送信を抑止');
+        return;
+      }
+      stats.send += 1;
+      logInfo('Ctrl+Enter → 送信ボタン click()', {
+        button: describeTarget(found.button),
+        via: found.via,
+      });
+      return;
     }
 
     // Shift+Enter: ChatGPT 側の既定動作（改行）に任せる
-    if (event.shiftKey) return;
+    if (event.shiftKey) {
+      stats.shiftPassthrough += 1;
+      logDebug('Shift+Enter: 既定動作に委任');
+      return;
+    }
 
     // Enter 単独: 送信ハンドラにだけ到達させない。既定の改行はそのまま働かせる。
     if (editable.tagName.toLowerCase() === 'input') {
@@ -307,6 +511,10 @@
       event.preventDefault();
     }
     event.stopPropagation();
+    stats.enterNewline += 1;
+    logInfo('Enter → 改行（ここで送信ハンドラには到達しなくなります）', {
+      editable: describeTarget(editable),
+    });
   }
 
   // ---- 登録 ---------------------------------------------------------------
@@ -314,8 +522,9 @@
   // compositionstart / compositionend は capture で受ける（どちらで届いても対応）
   window.addEventListener(
     'compositionstart',
-    () => {
+    (event) => {
       isComposingNow = true;
+      compositionStartedAt = typeof event.timeStamp === 'number' ? event.timeStamp : 0;
     },
     true
   );
@@ -324,6 +533,8 @@
     'compositionend',
     (event) => {
       isComposingNow = false;
+      compositionStartedAt = -Infinity;
+      warnedStuckComposition = false; // 次の変換で again 検知する
       compositionEndedAt = typeof event.timeStamp === 'number' ? event.timeStamp : 0;
     },
     true
@@ -340,4 +551,96 @@
 
   // window のキャプチャ段 = ChatGPT 本体（React のルート委譲）より先に立てる位置
   window.addEventListener('keydown', handleKeyDown, true);
+
+  // ---- 自己診断 -------------------------------------------------------------
+  // 入力欄・送信ボタンのセレクタが現行 DOM で生きているかをその場で確認する。
+  // ページの console から（拡張の console context を選ばなくても動く）:
+  //   document.dispatchEvent(new CustomEvent('chatgptEnterKeySelfTest'))
+  const COMPOSER_PROBE_SELECTORS = [
+    '#prompt-textarea[contenteditable="true"]',
+    '[contenteditable="true"][role="textbox"][aria-multiline="true"]',
+    '[contenteditable="true"][role="textbox"]',
+    '[contenteditable="true"]',
+    'textarea[name="prompt-textarea"]', // 非表示 fallback: accepted=false が正しい挙動
+  ];
+
+  function selfTest() {
+    const probes = [];
+    let accepted = null;
+
+    for (const selector of COMPOSER_PROBE_SELECTORS) {
+      let nodes = [];
+      try {
+        nodes = Array.from(document.querySelectorAll(selector));
+      } catch (_) {
+        nodes = [];
+      }
+      const first = nodes[0] || null;
+      const ok = first ? isComposerInput(first) : false;
+      if (ok && !accepted) accepted = first;
+      probes.push({
+        selector,
+        count: nodes.length,
+        element: describeTarget(first),
+        accepted: ok,
+      });
+    }
+
+    const scope = accepted
+      ? composerScopeOf(accepted)
+      : document.querySelector(COMPOSER_CONTAINER_SELECTOR) || document;
+    const found = findSendButton(scope);
+
+    const report = {
+      version: VERSION,
+      url: location.href,
+      composer: probes,
+      sendButton: {
+        via: found.via,
+        selector: found.selector || null,
+        button: describeTarget(found.button),
+        scope: describeTarget(scope),
+      },
+      ime: { isComposingNow, compositionStartedAt, compositionEndedAt },
+      stats: Object.assign({}, stats),
+    };
+
+    logInfo('自己診断:', report);
+
+    if (!accepted) {
+      logWarn(
+        '自己診断: 入力欄を 1 つも特定できませんでした。',
+        'チャックスレッドが開かれた状態で実行してください。それでも出ない場合はセレクタ更新が必要です（content.js の isComposerInput）。'
+      );
+    }
+    if (!found.button) {
+      logWarn(
+        '自己診断: 送信ボタンを特定できませんでした（via=' +
+          found.via +
+          '）。Ctrl+Enter が効かない状態です。',
+        'content.js の SEND_BUTTON_SELECTORS に実 DOM のセレクタを追加してください。'
+      );
+    }
+    return report;
+  }
+
+  // ページ側から呼べる入口（isolated world の関数は DevTools の
+  // 「JavaScript console context」で本拡張を選ぶと直接呼べる）
+  window.__chatgptEnterKeySelfTest = selfTest;
+  window.__chatgptEnterKeyStats = () => Object.assign({}, stats);
+  window.__chatgptEnterKeyVersion = VERSION;
+  document.addEventListener(SELF_TEST_EVENT, () => {
+    selfTest();
+  });
+
+  // 注入自体が効いていることの証（ページ読み込み時に 1 行だけ）
+  logInfo(
+    'v' +
+      VERSION +
+      ' 読み込み完了: Enter=改行 / Ctrl+Enter・Cmd+Enter=送信 / Shift+Enter=既定動作 / Alt+Enter=非干渉。' +
+      'ログ詳細: localStorage.setItem("chatgptEnterKeyLogLevel", "debug")、' +
+      '自己診断: document.dispatchEvent(new CustomEvent("' +
+      SELF_TEST_EVENT +
+      '"))'
+  );
 })();
