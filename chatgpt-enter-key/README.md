@@ -23,12 +23,19 @@ chatgpt-enter-key/
 
 ### content.js の仕組み（要点）
 
-- **EventListener の位置**: `window` の **keydown キャプチャ段**に登録する。
-  ChatGPT 本体（React のルート委譲ハンドラなど）より先に立てるため、
-  `stopPropagation()` だけで送信ハンドラに到達を止められる。
-- **Enter → 改行**: `preventDefault()` は使わない。
-  `stopPropagation()` のみで、ブラウザ／エディタ自身の既定の改行（DOM 更新）を使いきる。
-  合成イベントの偽造や `innerHTML` 書き換えは行わないので、React / ProseMirror の状態を壊しにくい。
+- **EventListener の位置**: `manifest.json` の `run_at` を `document_start` にして、
+  `window` の **keydown キャプチャ段**に「登録順で先頭」で立つようにしている。
+  ページ本体より遅く注入されると、後述の理由で Enter を止められない。
+- **Enter → 改行**: `preventDefault()` は使わず、**`stopImmediatePropagation()`**
+  で送信ハンドラへの到達だけを止める。
+  **`stopPropagation()` では「同一ノード・同一フェーズの後続リスナー」を止められない**
+  （＝ページ側が `window` に登録した keydown ハンドラを素通ししてしまう）。
+  v0.3 まではこれで勝てない環境があり、実測で Enter が送信に使われていた。
+  改行自体はブラウザ／エディタ自身の既定動作（DOM 更新）を使いきるので、
+  合成イベントの偽造や `innerHTML` 書き換えは行わず、React / ProseMirror の状態を壊しにくい。
+- **改行の実効チェック**: Enter を止めた直後と 60ms 後に composer の構造署名
+  （`innerHTML.length` + `childElementCount`）を取り、変わっていなければ
+  「改行が挿入されていない可能性」として warn を 1 回出す（§4）。
 - **Ctrl+Enter → 送信**: `KeyboardEvent` を再発行しない。
   送信ボタン（`data-testid="compose-send-button"` など候補 + `aria-label` 名称一致のフォールバック）を
   探して有効なら `click()`。ボタンが見つからない場合はイベントを素通しする。
@@ -83,12 +90,16 @@ chatgpt-enter-key/
 - [ ] `Enter` 改行が ChatGPT 側の状態に反映され、送信時に改行として届く
 - [ ] `Ctrl+Z` などの Undo / Redo、ペースト後の改行が壊れない
 - [ ] ページ遷移（新規チャット・履歴選択）後もそのまま機能する
-- [ ] Console に `[ChatGPT Enter Key] v0.3.0 読み込み完了 ...` が 1 行だけ出ている（＝注入されている）
+- [ ] Console に `[ChatGPT Enter Key] v0.4.0 読み込み完了 (run_at=document_start) ... Enter 方針=stopImmediate` が 1 行だけ出ている（＝注入されている）
 - [ ] `Enter` 押下で `Enter → 改行（...）` が 1 行だけ追加され、**文章タイプ中は無出力**のまま
 - [ ] `localStorage.setItem('chatgptEnterKeyLogLevel','debug')` で素通し理由まで出る
 - [ ] `document.dispatchEvent(new CustomEvent('chatgptEnterKeySelfTest'))` で
       入力欄が `accepted: true`、送信ボタンが `via: "selector"` になる
       （`accepted: false` ばかり／`via: "none"` なら §5 の弱点＝セレクタ陳腐化）
+- [ ] `Enter` 押下の約 60ms 後に `composer の DOM が変わっていません` と warn が出ない
+      （出た場合は既定の改行が止まっている → §4 の方針切り替え）
+- [ ] スラッシュコマンド等の**候補一覧で Enter 決定**する UI が従来どおり
+      （既定方針は Enter の keydown を完全に断つため、そこだけ副作用が出うる）
 
 ## 4. コンソールログ（不良検知）
 
@@ -98,9 +109,9 @@ content script のログはページのコンソールに `content.js:行番号`
 
 | レベル | 内容 |
 | --- | --- |
-| `info`（既定） | 読み込み完了 1 行（＝注入されている証明）／ `Enter → 改行` ／ `Ctrl+Enter → 送信ボタン click()` ／ 自己診断の結果 |
-| `warn` | 送信ボタンが見つからない／候補は有るが押下不可／名称一致フォールバックで送信した／入力欄を特定できない状態の反復／ IME フラグ滞留 |
-| `debug` | 素通しした理由（IME 変換中・Alt 併用・Shift+Enter・二重送信抑止・対象外要素） |
+| `info`（既定） | 読み込み完了 1 行（＝注入されている証明・方針も表示）／ `Enter → 改行（strategy: ...）` ／ `Ctrl+Enter → 送信ボタン click()` ／ 自己診断の結果 |
+| `warn` | 送信ボタンが見つからない／候補は有るが押下不可／名称一致フォールバックで送信した／入力欄を特定できない状態の反復／ IME フラグ滞留／ **Enter を止めたのに composer の DOM が変わらない（改行未反映）** ／自前挿入の失敗 |
+| `debug` | 素通しした理由（IME 変換中・Alt 併用・Shift+Enter・二重送信抑止・対象外要素）／改行が DOM に反映されたこと／ Enter keyup を対で止めたこと |
 
 **通常のタイピングでは 1 行も出ない。** 既定（`info`）で出力するのは、ページ読み込み時の 1 行と Enter を押した時だけ。
 
@@ -109,6 +120,14 @@ content script のログはページのコンソールに `content.js:行番号`
 localStorage.setItem('chatgptEnterKeyLogLevel', 'debug');
 localStorage.setItem('chatgptEnterKeyLogLevel', 'off');
 localStorage.removeItem('chatgptEnterKeyLogLevel'); // 既定（info）に戻す
+
+// Enter を送信ハンドラから守る方針の切り替え（下記「Enter の方針」）
+localStorage.setItem('chatgptEnterKeyStrategy', 'stopImmediate+insertText');
+localStorage.removeItem('chatgptEnterKeyStrategy'); // 既定（stopImmediate）に戻す
+
+// 改行が DOM に反映されたかのチェックを止める（'0' で OFF）
+localStorage.setItem('chatgptEnterKeyVerify', '0');
+localStorage.removeItem('chatgptEnterKeyVerify');
 
 // 「今この瞬間の DOM」で入力欄・送信ボタンが生きているか即検査
 document.dispatchEvent(new CustomEvent('chatgptEnterKeySelfTest'));
@@ -123,16 +142,50 @@ DevTools の context で本拡張を選べば `__chatgptEnterKeySelfTest()`（�
 
 | 症状 | ログの征兆 | 対応 |
 | --- | --- | --- |
-| そもそも効いていない | `v0.3.0 読み込み完了` が出ていない | タブを完全に閉じて開き直す／拡張が有効か／`chatgpt.com` か |
+| そもそも効いていない | `v0.4.0 読み込み完了` が出ていない | タブを完全に閉じて開き直す／拡張が有効か／`chatgpt.com` か |
+| **`Enter` が送信される（ログは出ている）** | `Enter → 改行（strategy: stopImmediate）` が出るのに送信される | 方針が負けている。下記「Enter の方針」で `stopImmediate+insertText` → `+killKeyUp` の順に上げる |
 | `Enter` で改行されない | `Enter` に対するログが 1 行も無い | 入力欄を特定できていない。自己診断で `accepted: false` ばかりなら `isComposerInput` の条件を更新 |
+| 改行だけ増えない | `送信ハンドラを止めたはずが composer の DOM が変わっていません` | 既定動作が止まっている。`chatgptEnterKeyStrategy` を `stopImmediate+insertText` にして自前挿入に切り替える |
 | `Ctrl+Enter` で送信されない | `Ctrl+Enter: 送信ボタンが見つからず素通し` | 自己診断の `sendButton.via` が `none` なら `SEND_BUTTON_SELECTORS` に実 DOM のセレクタを追加 |
 | 送信はされるが warn 付き | `名称一致（aria-label / title 等）で送信しました` | セレクタ配列が死んでいる。上記追加でフォールバックを外す |
 | 変換確定直後だけおかしい | `compositionstart から N 秒経過` の warn | IME フラグ取りこぼし。入力欄外をクリック or ページ再読み込みで解消 |
 
+### Enter の方針（strategy）
+
+`stopPropagation()` は「同じノード・同じフェーズの後続リスナー」を止められない。
+ChatGPT 側が `window` に keydown を登録していると、注入がページより後だと
+そのハンドラが先に走って Enter が送信に使われてしまう。
+そのため v0.4 は `run_at: document_start`（登録順で先頭）＋ `stopImmediatePropagation()` にした。
+それでも負ける実装に備えて、方針を実行中に切り替えられる。
+
+| 方針（`chatgptEnterKeyStrategy`） | 内容 |
+| --- | --- |
+| `stop` | `stopPropagation()` のみ（v0.3 まで。負けることがある） |
+| `stopImmediate`（既定） | 同一ノードの後続も断つ。改行は既定動作に委任 |
+| `stopImmediate+insertText` | 既定動作も止めて `execCommand('insertText', '\n')` で自前挿入 |
+| `stopImmediate+insertText+killKeyUp` | さらに Enter の `keyup` も対で断つ（keyup で送信する実装対策） |
+
+切り替えはページのコンソールから（リロード不要、次の Enter から有効）:
+
+```js
+localStorage.setItem('chatgptEnterKeyStrategy', 'stopImmediate+insertText');
+```
+
+どの方針が効いているかは自己診断の `config.strategy` に出る。
+送信元の特定が必要なら、ページのコンソールで以下も有効（第 2 引数の `true` がキャプチャ）:
+
+```js
+getEventListeners(window).keydown;
+getEventListeners(document).keydown;
+getEventListeners(document.getElementById('prompt-textarea')).keydown;
+```
+
 ## 5. 既知の弱点
 
 - **DOM 依存**: `#prompt-textarea`、`#composer`、`data-testid="compose-send-button"` は ChatGPT の改版で変わると検出に失敗する。その場合 `Ctrl+Enter` は無害に素通しされ、`Enter` の改行化も効かないことがある。
-- **既定改行に頼っている**: `Enter` はブラウザ／エディタの既定動作に委ねているため、改版で既定動作そのものが潰されていると改行が増えない（その場合は `insertText` 系のフォールバック追加が必要）。
+- **既定改行に頼っている**: `Enter` の既定方針（`stopImmediate`）はブラウザ／エディタの既定動作に改行を委ねているため、改版で既定動作そのものが潰されていると改行が増えない。その場合は `chatgptEnterKeyStrategy = 'stopImmediate+insertText'` で自前挿入に切り替える（`execCommand('insertText', '\n')` は非推奨 API なので、ProseMirror 側のノード構造に合わない可能性がある＝逃生綱扱い）。
+- **`stopImmediatePropagation()` の副作用**: 既定方針は Enter の keydown を完全に断つため、**入力欄の候補一覧（スラッシュコマンド・@ 言及など）で Enter 決定する UI** が一緒に効かなくなる可能性がある。その場合は `Shift+Enter` 等で回避するか、`chatgptEnterKeyStrategy = 'stop'` に戻す（戻すと送信を止められない環境がある）。
+- **改行チェックの誤検知**: 構造署名（`innerHTML.length` + `childElementCount`）で改行の反映を見るため、空段落の統合など DOM が変わらない改行では誤って warn することがある（実害はなく、`chatgptEnterKeyVerify = '0'` で止められる）。
 - **生成中の `Ctrl+Enter`**: 送信ボタンが無効になるため基本は素通しだが、`aria-label` 名称一致のフォールバックが意図しないボタンに一致する理論余地がある。
 - **`Cmd+Enter`**: macOS 対策として `Ctrl+Enter` と同扱い。Linux/Windows で Superキー併用も送信になる。
 - **IME 猶予窓**: `compositionend` 後 100ms 以内の `Enter` は安全側で無視する。変換確定と送信を 0.1 秒未満で連続実行すると 1 回無視されることがある。

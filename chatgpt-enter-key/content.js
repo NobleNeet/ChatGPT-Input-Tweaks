@@ -103,7 +103,7 @@
   //     localStorage.setItem('chatgptEnterKeyLogLevel', 'off')     // 無音
   //   自己診断（セレクタが生きているか等）:
   //     document.dispatchEvent(new CustomEvent('chatgptEnterKeySelfTest'))
-  const VERSION = '0.3.0';
+  const VERSION = '0.4.0';
   const LOG_TAG = '[ChatGPT Enter Key]';
   const LOG_STORAGE_KEY = 'chatgptEnterKeyLogLevel';
   const SELF_TEST_EVENT = 'chatgptEnterKeySelfTest';
@@ -164,10 +164,102 @@
     nonComposerEnter: 0, // 編集域だったが composer と特定できなかった回数
     noSendButton: 0,
     guarded: 0,
+    keyUpStopped: 0, // strategy が keyup 停止を有効にした回数
   };
   const recentMisses = []; // 直近の「特定できなかった Enter」の時刻
   let warnedDetection = false;
   let warnedStuckComposition = false;
+
+  // ---- Enter の扱い方針（strategy） ----------------------------------------
+  // 重要: `stopPropagation()` は「同一ノード同一フェーズの他リスナー」を止められない。
+  // window のキャプチャ段にあっても、ページ側（または注入の速い拡張）が window に
+  // keydown を登録していると、その順は登録順で先に走るため Enter が送信に使える。
+  // → 実効手段は (1) 注入を document_start にして登録順で先頭になる
+  //   (2) stopImmediatePropagation() で同一ノード後続も断つ、の 2 点。
+  // 段階（localStorage 'chatgptEnterKeyStrategy' で実行中に切り替えて検証できる）:
+  //   stop                              ... v0.3 まではこの挙動（ページ側に負けることがある）
+  //   stopImmediate                       ... 既定。同一ノード後続も断つ。改行は既定動作に委ねる
+  //   stopImmediate+insertText            ... 既定動作も止めて自前で改行挿入（既定動作が死んでいる環境用）
+  //   stopImmediate+insertText+killKeyUp  ... さらに Enter の keyup も断つ（keyup で送信する実装対策）
+  const ENTER_STRATEGIES = [
+    'stop',
+    'stopImmediate',
+    'stopImmediate+insertText',
+    'stopImmediate+insertText+killKeyUp',
+  ];
+  const ENTER_STRATEGY_DEFAULT = 'stopImmediate';
+  const STRATEGY_STORAGE_KEY = 'chatgptEnterKeyStrategy';
+  const VERIFY_STORAGE_KEY = 'chatgptEnterKeyVerify';
+  const VERIFY_NEWLINE_MS = 60; // 既定動作で改行が反映されたか見る待ち時間
+
+  function readStored(key, windowKey) {
+    if (typeof window[windowKey] === 'string') return window[windowKey];
+    try {
+      const stored = window.localStorage && window.localStorage.getItem(key);
+      if (stored) return stored;
+    } catch (_) {
+      /* localStorage 使えなくても既定値 */
+    }
+    return null;
+  }
+
+  function enterStrategy() {
+    const s = readStored(STRATEGY_STORAGE_KEY, '__chatgptEnterKeyStrategy');
+    return s && ENTER_STRATEGIES.indexOf(s) !== -1 ? s : ENTER_STRATEGY_DEFAULT;
+  }
+  function usesStopImmediate(strategy) {
+    return strategy !== 'stop';
+  }
+  function usesInsertText(strategy) {
+    return strategy.indexOf('+insertText') !== -1;
+  }
+  function usesKillKeyUp(strategy) {
+    return strategy.indexOf('+killKeyUp') !== -1;
+  }
+
+  // 改行が実際に DOM へ反映されたかを後から確認する（不良検知の要）
+  function composerSignature(el) {
+    try {
+      return (el.innerHTML || '').length + ':' + el.childElementCount;
+    } catch (_) {
+      return null;
+    }
+  }
+  function verifyNewlineEnabled() {
+    return readStored(VERIFY_STORAGE_KEY, '__chatgptEnterKeyVerify') !== '0';
+  }
+  function verifyNewline(editable) {
+    if (!verifyNewlineEnabled() || typeof window.setTimeout !== 'function') return;
+    const before = composerSignature(editable);
+    if (before === null) return;
+    window.setTimeout(() => {
+      const after = composerSignature(editable);
+      if (after === null || after === before) {
+        logWarn(
+          'Enter: 送信ハンドラを止めたはずが composer の DOM が変わっていません。',
+          '改行が挿入されていない（既定動作が止まっている）可能性があります。' +
+            '→ localStorage.setItem("' +
+            STRATEGY_STORAGE_KEY +
+            '", "stopImmediate+insertText") で自前挿入に切り替えて確認してください。',
+          { editable: describeTarget(editable), signature: after }
+        );
+      } else {
+        logDebug('Enter: 既定の改行が DOM に反映されました', { before, after });
+      }
+    }, VERIFY_NEWLINE_MS);
+  }
+
+  // 自前挿入（既定動作を止める strategy でのみ使う）
+  function insertNewlineSelf(editable) {
+    try {
+      if (typeof document.execCommand === 'function') {
+        return document.execCommand('insertText', false, '\n') === true;
+      }
+    } catch (_) {
+      /* execCommand 非対応でも既定動作に戻さない */
+    }
+    return false;
+  }
 
   // ---- IME 状態 ------------------------------------------------------------
 
@@ -348,6 +440,7 @@
   }
 
   let lastSendAt = -Infinity;
+  let killNextEnterKeyUp = null; // { at } strategy で keyup も断つための照合用
 
   // 戻り値: 'sent'（click 済み）| 'guarded'（連打抑止で何もしない）
   function sendWith(button, event) {
@@ -356,9 +449,12 @@
     if (now - lastSendAt < SEND_GUARD_MS) return 'guarded';
     lastSendAt = now;
 
-    // ChatGPT 側に Enter を渡さず、既定の改行挿入も止めてから click() する
+    // ChatGPT 側に Enter を渡さず、既定の改行挿入も止めてから click() する。
+    // 同一ノード同一フェーズの後続リスナー（ページ側の window ハンドラ等）も
+    // 断つ必要があるため stopImmediatePropagation() を使う。
     event.preventDefault();
-    event.stopPropagation();
+    if (usesStopImmediate(enterStrategy())) event.stopImmediatePropagation();
+    else event.stopPropagation();
     button.click();
     return 'sent';
   }
@@ -505,16 +601,43 @@
       return;
     }
 
-    // Enter 単独: 送信ハンドラにだけ到達させない。既定の改行はそのまま働かせる。
+    // Enter 単独: 送信ハンドラに到達させない。既定の改行はそのまま働かせる。
+    const strategy = enterStrategy();
+
     if (editable.tagName.toLowerCase() === 'input') {
       // 1 行 input の既定 Enter は form 送信になるため、それだけ止める（改行は不可）
       event.preventDefault();
     }
-    event.stopPropagation();
+    // 「自前挿入」を選ぶなら既定動作も止める（既定動作が効いている環境では不要）
+    const wantSelfInsert = usesInsertText(strategy) && editable.isContentEditable === true;
+    if (wantSelfInsert) event.preventDefault();
+
+    // ここが要点: stopPropagation() では「同一ノード同一フェーズの後続リスナー」が
+    //止められない。window に keydown を登録している実装があると Enter が送信に
+    //使えるため、既定 strategy では stopImmediatePropagation() で断つ。
+    if (usesStopImmediate(strategy)) event.stopImmediatePropagation();
+    else event.stopPropagation();
+
+    let selfInserted = false;
+    if (wantSelfInsert) selfInserted = insertNewlineSelf(editable);
+    if (usesKillKeyUp(strategy)) killNextEnterKeyUp = { at: event.timeStamp };
+
     stats.enterNewline += 1;
-    logInfo('Enter → 改行（ここで送信ハンドラには到達しなくなります）', {
+    logInfo('Enter → 改行（strategy: ' + strategy + '）', {
       editable: describeTarget(editable),
+      selfInserted: wantSelfInsert ? selfInserted : null,
     });
+
+    if (wantSelfInsert) {
+      if (!selfInserted) {
+        logWarn(
+          'Enter: 自前挿入（execCommand insertText）に失敗しました。改行が増えない可能性があります。',
+          { editable: describeTarget(editable) }
+        );
+      }
+    } else {
+      verifyNewline(editable); // 既定動作で改行が DOM に反映されたか後で確認
+    }
   }
 
   // ---- 登録 ---------------------------------------------------------------
@@ -550,7 +673,24 @@
   );
 
   // window のキャプチャ段 = ChatGPT 本体（React のルート委譲）より先に立てる位置
+  // （manifest の run_at を document_start にしているので登録順で先頭になれる）
   window.addEventListener('keydown', handleKeyDown, true);
+
+  // strategy が keyup 停止を選ぶ場合のみ、Enter の keyup を対で断つ。
+  // keydown を完全に止めても keyup は別途届くため、keyup で送信する実装対策。
+  window.addEventListener(
+    'keyup',
+    (event) => {
+      if (event.key !== 'Enter' || !killNextEnterKeyUp) return;
+      const matched = killNextEnterKeyUp.at === event.timeStamp;
+      killNextEnterKeyUp = null;
+      if (!matched) return;
+      stats.keyUpStopped += 1;
+      event.stopImmediatePropagation();
+      logDebug('Enter keyup: keydown と対のため停止');
+    },
+    true
+  );
 
   // ---- 自己診断 -------------------------------------------------------------
   // 入力欄・送信ボタンのセレクタが現行 DOM で生きているかをその場で確認する。
@@ -594,6 +734,12 @@
     const report = {
       version: VERSION,
       url: location.href,
+      config: {
+        runAt: 'document_start',
+        logLevel: logLevel(),
+        strategy: enterStrategy(),
+        verifyNewline: verifyNewlineEnabled(),
+      },
       composer: probes,
       sendButton: {
         via: found.via,
@@ -637,7 +783,12 @@
   logInfo(
     'v' +
       VERSION +
-      ' 読み込み完了: Enter=改行 / Ctrl+Enter・Cmd+Enter=送信 / Shift+Enter=既定動作 / Alt+Enter=非干渉。' +
+      ' 読み込み完了 (run_at=document_start): Enter=改行 / Ctrl+Enter・Cmd+Enter=送信 / ' +
+      'Shift+Enter=既定動作 / Alt+Enter=非干渉。Enter 方針=' +
+      enterStrategy() +
+      '（切り替え: localStorage.setItem("' +
+      STRATEGY_STORAGE_KEY +
+      '", "<方針>")、' +
       'ログ詳細: localStorage.setItem("chatgptEnterKeyLogLevel", "debug")、' +
       '自己診断: document.dispatchEvent(new CustomEvent("' +
       SELF_TEST_EVENT +
