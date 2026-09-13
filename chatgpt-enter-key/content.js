@@ -9,13 +9,13 @@
  *   IME 変換中の Enter ... 絶対に何もしない
  *
  * 設計メモ
- *   - keydown は window のキャプチャ段（document より上流＝最も早い段）で受け取り、
+ *   - ChatGPT 本体と同じ MAIN world で、keydown を window のキャプチャ段
+ *     （document より上流＝最も早い段）で受け取り、
  *     event.target から都度「ChatGPT の入力欄か？」を判定する委譲方式。
  *     SPA で DOM が再生成されるため、要素参照は一切保持しない。
- *   - 「Enter で改行」は preventDefault() で既定動作を止めるのではなく、
- *     stopPropagation() で ChatGPT 本体の送信ハンドラにだけ到達させ、
- *     ブラウザ／エディタ自身の改行処理（DOM 更新）を使いきる。
- *     → innerHTML の書き換えや合成イベントの偽造は行わない。
+ *   - 「Enter で改行」は元のイベントを ChatGPT 側から Shift+Enter に見えるようにし、
+ *     ChatGPT / ProseMirror 自身の改行処理へ委任する。
+ *     → DOM 書き換えや KeyboardEvent の生成・再発行は行わない。
  *   - 「Ctrl+Enter で送信」は KeyboardEvent を作り直して再発行しない。
  *     送信ボタン要素を見つけて click() する。
  *   - 送信ボタンが見つからない場合はイベントを素通しする（暴走防止）。
@@ -103,7 +103,7 @@
   //     localStorage.setItem('chatgptEnterKeyLogLevel', 'off')     // 無音
   //   自己診断（セレクタが生きているか等）:
   //     document.dispatchEvent(new CustomEvent('chatgptEnterKeySelfTest'))
-  const VERSION = '0.4.0';
+  const VERSION = '0.9.0';
   const LOG_TAG = '[ChatGPT Enter Key]';
   const LOG_STORAGE_KEY = 'chatgptEnterKeyLogLevel';
   const SELF_TEST_EVENT = 'chatgptEnterKeySelfTest';
@@ -164,7 +164,7 @@
     nonComposerEnter: 0, // 編集域だったが composer と特定できなかった回数
     noSendButton: 0,
     guarded: 0,
-    keyUpStopped: 0, // strategy が keyup 停止を有効にした回数
+    keyUpStopped: 0, // remap失敗時にkeyupを停止した回数
   };
   const recentMisses = []; // 直近の「特定できなかった Enter」の時刻
   let warnedDetection = false;
@@ -177,17 +177,15 @@
   // → 実効手段は (1) 注入を document_start にして登録順で先頭になる
   //   (2) stopImmediatePropagation() で同一ノード後続も断つ、の 2 点。
   // 段階（localStorage 'chatgptEnterKeyStrategy' で実行中に切り替えて検証できる）:
-  //   stop                              ... v0.3 まではこの挙動（ページ側に負けることがある）
-  //   stopImmediate                       ... 既定。同一ノード後続も断つ。改行は既定動作に委ねる
-  //   stopImmediate+insertText            ... 既定動作も止めて自前で改行挿入（既定動作が死んでいる環境用）
-  //   stopImmediate+insertText+killKeyUp  ... さらに Enter の keyup も断つ（keyup で送信する実装対策）
+  //   remapToShiftEnter ... 既定。元のEnterをShift+EnterとしてChatGPTへ委任
+  //   stop              ... v0.3 までの挙動（ページ側に負けることがある）
+  //   stopImmediate     ... 送信を断つが、環境によっては改行も行われない
   const ENTER_STRATEGIES = [
+    'remapToShiftEnter',
     'stop',
     'stopImmediate',
-    'stopImmediate+insertText',
-    'stopImmediate+insertText+killKeyUp',
   ];
-  const ENTER_STRATEGY_DEFAULT = 'stopImmediate';
+  const ENTER_STRATEGY_DEFAULT = 'remapToShiftEnter';
   const STRATEGY_STORAGE_KEY = 'chatgptEnterKeyStrategy';
   const VERIFY_STORAGE_KEY = 'chatgptEnterKeyVerify';
   const VERIFY_NEWLINE_MS = 60; // 既定動作で改行が反映されたか見る待ち時間
@@ -210,11 +208,33 @@
   function usesStopImmediate(strategy) {
     return strategy !== 'stop';
   }
-  function usesInsertText(strategy) {
-    return strategy.indexOf('+insertText') !== -1;
-  }
-  function usesKillKeyUp(strategy) {
-    return strategy.indexOf('+killKeyUp') !== -1;
+
+  // 新しいイベントは作らず、同じイベントをページ側からShift+Enterに見せる。
+  function remapAsShiftEnter(event) {
+    try {
+      Object.defineProperty(event, 'shiftKey', {
+        configurable: true,
+        value: true,
+      });
+    } catch (_) {
+      return false;
+    }
+
+    const originalGetModifierState = event.getModifierState;
+    if (typeof originalGetModifierState === 'function') {
+      try {
+        Object.defineProperty(event, 'getModifierState', {
+          configurable: true,
+          value(modifier) {
+            if (modifier === 'Shift') return true;
+            return originalGetModifierState.call(this, modifier);
+          },
+        });
+      } catch (_) {
+        // shiftKey 自体を変更できていればReact等の通常判定には十分。
+      }
+    }
+    return event.shiftKey === true;
   }
 
   // 改行が実際に DOM へ反映されたかを後から確認する（不良検知の要）
@@ -236,29 +256,14 @@
       const after = composerSignature(editable);
       if (after === null || after === before) {
         logWarn(
-          'Enter: 送信ハンドラを止めたはずが composer の DOM が変わっていません。',
-          '改行が挿入されていない（既定動作が止まっている）可能性があります。' +
-            '→ localStorage.setItem("' +
-            STRATEGY_STORAGE_KEY +
-            '", "stopImmediate+insertText") で自前挿入に切り替えて確認してください。',
+          'Enter 操作後も composer の DOM が変わっていません。',
+          'ChatGPT 側の Shift+Enter 改行処理が実行されなかった可能性があります。',
           { editable: describeTarget(editable), signature: after }
         );
       } else {
         logDebug('Enter: 既定の改行が DOM に反映されました', { before, after });
       }
     }, VERIFY_NEWLINE_MS);
-  }
-
-  // 自前挿入（既定動作を止める strategy でのみ使う）
-  function insertNewlineSelf(editable) {
-    try {
-      if (typeof document.execCommand === 'function') {
-        return document.execCommand('insertText', false, '\n') === true;
-      }
-    } catch (_) {
-      /* execCommand 非対応でも既定動作に戻さない */
-    }
-    return false;
   }
 
   // ---- IME 状態 ------------------------------------------------------------
@@ -331,6 +336,11 @@
     );
   }
 
+  function hasPromptFallbackSibling(el) {
+    const parent = el.parentElement;
+    return Boolean(parent && parent.querySelector('textarea[name="prompt-textarea"]'));
+  }
+
   // この編集域へ Enter を介入してよいか否か
   function isComposerInput(el) {
     if (!el) return false;
@@ -351,11 +361,11 @@
     // tag 実体（contenteditable div）であることを条件に含め、同名の fallback を寄せ付けない。
     if (el.id === 'prompt-textarea' && looksLikeRichComposer(el)) return true;
 
-    // 肯定条件 2: contenteditable + role=textbox + aria-multiline=true（現行構成）
-    if (looksLikeRichComposer(el)) return true;
+    // 肯定条件 2: 現行 DOM の rich editor + 非表示 fallback textarea の組み合わせ
+    if (looksLikeRichComposer(el) && hasPromptFallbackSibling(el)) return true;
 
-    // 肯定条件 3: composer コンテナ配下の rich editable（非 rich は fallback の可能性）
-    if (isRich && isInsideComposer(el)) return true;
+    // 肯定条件 3: composer コンテナ配下の rich textbox
+    if (looksLikeRichComposer(el) && isInsideComposer(el)) return true;
 
     // 肯定条件 4: 旧 textarea 構成向け。可視かつ「送信らしきボタンのある form」に限る
     if (isTextControl) {
@@ -368,10 +378,21 @@
   // Ctrl+Enter の送信対象を辿るスコープ。
   // rich editor（contenteditable）は form でラップされていないことが多く、
   // form まで落とすと本文全体が scope 化して誤ヒットするため、
-  // 「composer コンテナ → 直近の親」の順に狭い範囲だけを探す。
+  // 「composer コンテナ → form → 送信ボタンを含む近い祖先」の順で探す。
   function composerScopeOf(el) {
     if (el.isContentEditable === true) {
-      return el.closest(COMPOSER_CONTAINER_SELECTOR) || el.parentElement || null;
+      const semanticScope = el.closest(COMPOSER_CONTAINER_SELECTOR) || el.closest('form');
+      if (semanticScope) return semanticScope;
+
+      // 現行DOMでform等が無い場合、送信ボタンを含む最も近い祖先まで限定的に辿る。
+      let scope = el.parentElement;
+      for (let depth = 0; scope && depth < 6; depth += 1) {
+        const found = findSendButton(scope);
+        if (found.via !== 'none' && found.via !== 'no-scope') return scope;
+        if (scope === document.body || scope === document.documentElement) break;
+        scope = scope.parentElement;
+      }
+      return el.parentElement || null;
     }
     return (
       el.closest(COMPOSER_CONTAINER_SELECTOR) ||
@@ -440,21 +461,23 @@
   }
 
   let lastSendAt = -Infinity;
-  let killNextEnterKeyUp = null; // { at } strategy で keyup も断つための照合用
+  let remappedPlainEnter = null; // { at } keypress / keyupにもShift状態を引き継ぐ
+  let suppressedPlainEnter = null; // remap失敗時にkeypress / keyupを安全側で断つ
 
   // 戻り値: 'sent'（click 済み）| 'guarded'（連打抑止で何もしない）
   function sendWith(button, event) {
     const now = typeof event.timeStamp === 'number' ? event.timeStamp : Date.now();
-    // 連打・キーリピートによる二重送信を防ぐ
-    if (now - lastSendAt < SEND_GUARD_MS) return 'guarded';
-    lastSendAt = now;
-
     // ChatGPT 側に Enter を渡さず、既定の改行挿入も止めてから click() する。
     // 同一ノード同一フェーズの後続リスナー（ページ側の window ハンドラ等）も
     // 断つ必要があるため stopImmediatePropagation() を使う。
     event.preventDefault();
     if (usesStopImmediate(enterStrategy())) event.stopImmediatePropagation();
     else event.stopPropagation();
+
+    // 連打・キーリピート時もイベントは止め、ChatGPT 側の処理による二重送信を防ぐ。
+    if (now - lastSendAt < SEND_GUARD_MS) return 'guarded';
+    lastSendAt = now;
+
     button.click();
     return 'sent';
   }
@@ -486,7 +509,7 @@
         recentMisses.length +
         ' 回 Enter を押しましたが、入力欄を composer として特定できませんでした。',
       '入力欄の構造が改版で変わった可能性があります（現行条件: ' +
-        '#prompt-textarea かつ rich / contenteditable+role=textbox+aria-multiline=true / composer コンテナ配下の rich editable）。',
+        '#prompt-textarea かつ rich / rich textbox + fallback textarea の兄弟 / composer コンテナ配下の rich textbox）。',
       {
         target: describeTarget(event.target),
         nearestEditable: describeTarget(editable),
@@ -601,43 +624,44 @@
       return;
     }
 
-    // Enter 単独: 送信ハンドラに到達させない。既定の改行はそのまま働かせる。
+    // Enter 単独: 既定方針では同じイベントをShift+EnterとしてChatGPTへ委任する。
     const strategy = enterStrategy();
+
+    if (strategy === 'remapToShiftEnter') {
+      if (remapAsShiftEnter(event)) {
+        remappedPlainEnter = { at: event.timeStamp };
+        stats.enterNewline += 1;
+        verifyNewline(editable);
+        logInfo('Enter → Shift+Enter として ChatGPT に委任', {
+          editable: describeTarget(editable),
+          remappedShiftKey: event.shiftKey,
+        });
+        return;
+      }
+
+      // remapできない環境では送信防止を優先し、このEnterを完全に止める。
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      suppressedPlainEnter = { at: event.timeStamp };
+      logWarn('Enter を Shift+Enter として扱えなかったため、誤送信防止のため停止しました。');
+      return;
+    }
 
     if (editable.tagName.toLowerCase() === 'input') {
       // 1 行 input の既定 Enter は form 送信になるため、それだけ止める（改行は不可）
       event.preventDefault();
     }
-    // 「自前挿入」を選ぶなら既定動作も止める（既定動作が効いている環境では不要）
-    const wantSelfInsert = usesInsertText(strategy) && editable.isContentEditable === true;
-    if (wantSelfInsert) event.preventDefault();
-
     // ここが要点: stopPropagation() では「同一ノード同一フェーズの後続リスナー」が
     //止められない。window に keydown を登録している実装があると Enter が送信に
     //使えるため、既定 strategy では stopImmediatePropagation() で断つ。
     if (usesStopImmediate(strategy)) event.stopImmediatePropagation();
     else event.stopPropagation();
 
-    let selfInserted = false;
-    if (wantSelfInsert) selfInserted = insertNewlineSelf(editable);
-    if (usesKillKeyUp(strategy)) killNextEnterKeyUp = { at: event.timeStamp };
-
     stats.enterNewline += 1;
     logInfo('Enter → 改行（strategy: ' + strategy + '）', {
       editable: describeTarget(editable),
-      selfInserted: wantSelfInsert ? selfInserted : null,
     });
-
-    if (wantSelfInsert) {
-      if (!selfInserted) {
-        logWarn(
-          'Enter: 自前挿入（execCommand insertText）に失敗しました。改行が増えない可能性があります。',
-          { editable: describeTarget(editable) }
-        );
-      }
-    } else {
-      verifyNewline(editable); // 既定動作で改行が DOM に反映されたか後で確認
-    }
+    verifyNewline(editable);
   }
 
   // ---- 登録 ---------------------------------------------------------------
@@ -676,14 +700,54 @@
   // （manifest の run_at を document_start にしているので登録順で先頭になれる）
   window.addEventListener('keydown', handleKeyDown, true);
 
-  // strategy が keyup 停止を選ぶ場合のみ、Enter の keyup を対で断つ。
-  // keydown を完全に止めても keyup は別途届くため、keyup で送信する実装対策。
+  // keydown 後の keypress にも、remapしたShift状態を引き継ぐ。
+  window.addEventListener(
+    'keypress',
+    (event) => {
+      if (event.key !== 'Enter') return;
+      const editable = findEditableAncestor(event.target);
+
+      if (remappedPlainEnter) {
+        const elapsed = event.timeStamp - remappedPlainEnter.at;
+        if (elapsed >= 0 && elapsed < 30000 && isComposerInput(editable)) {
+          remapAsShiftEnter(event);
+          logDebug('Enter keypress: Shift+Enter 状態を引き継ぎ');
+        }
+        return;
+      }
+
+      if (!suppressedPlainEnter) return;
+      const elapsed = event.timeStamp - suppressedPlainEnter.at;
+      if (!(elapsed >= 0 && elapsed < 2000 && isComposerInput(editable))) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      logDebug('Enter keypress: keydown と対のため停止');
+    },
+    true
+  );
+
+  // keyup は別イベントとして届くため、同じEnter操作のものだけ断つ。
   window.addEventListener(
     'keyup',
     (event) => {
-      if (event.key !== 'Enter' || !killNextEnterKeyUp) return;
-      const matched = killNextEnterKeyUp.at === event.timeStamp;
-      killNextEnterKeyUp = null;
+      if (event.key !== 'Enter') return;
+      const editable = findEditableAncestor(event.target);
+
+      if (remappedPlainEnter) {
+        const elapsed = event.timeStamp - remappedPlainEnter.at;
+        const matched = elapsed >= 0 && elapsed < 30000 && isComposerInput(editable);
+        remappedPlainEnter = null;
+        if (matched) {
+          remapAsShiftEnter(event);
+          logDebug('Enter keyup: Shift+Enter 状態を引き継ぎ');
+        }
+        return;
+      }
+
+      if (!suppressedPlainEnter) return;
+      const elapsed = event.timeStamp - suppressedPlainEnter.at;
+      const matched = elapsed >= 0 && elapsed < 2000 && isComposerInput(editable);
+      suppressedPlainEnter = null;
       if (!matched) return;
       stats.keyUpStopped += 1;
       event.stopImmediatePropagation();
@@ -703,6 +767,91 @@
     '[contenteditable="true"]',
     'textarea[name="prompt-textarea"]', // 非表示 fallback: accepted=false が正しい挙動
   ];
+  const COMPOSER_PROBE_SELECTOR = COMPOSER_PROBE_SELECTORS.join(', ');
+
+  // 実際に検出した DOM 要素を自動で console に出す。
+  // WeakSet なので、SPA で破棄された入力欄を診断機能が保持し続けることはない。
+  const loggedComposerElements = new WeakSet();
+  let hasDetectedComposer = false;
+  let diagnosticScanQueued = false;
+  const diagnosticRoots = new Set();
+
+  function composerCandidatesWithin(root) {
+    const candidates = [];
+    if (root instanceof Element && root.matches(COMPOSER_PROBE_SELECTOR)) {
+      candidates.push(root);
+    }
+    if (root && typeof root.querySelectorAll === 'function') {
+      candidates.push(...root.querySelectorAll(COMPOSER_PROBE_SELECTOR));
+    }
+    return Array.from(new Set(candidates));
+  }
+
+  function logComposerElementsWithin(root) {
+    for (const element of composerCandidatesWithin(root)) {
+      if (!isComposerInput(element) || loggedComposerElements.has(element)) continue;
+      loggedComposerElements.add(element);
+      hasDetectedComposer = true;
+      // 要素そのものを渡すため、DevTools から展開・inspect できる。
+      logInfo('ChatGPT の入力欄 DOM を検出しました:', element);
+    }
+  }
+
+  function queueComposerDiagnosticScan(root) {
+    diagnosticRoots.add(root || document);
+    if (diagnosticScanQueued) return;
+    diagnosticScanQueued = true;
+    window.requestAnimationFrame(() => {
+      diagnosticScanQueued = false;
+      for (const scanRoot of diagnosticRoots) logComposerElementsWithin(scanRoot);
+      diagnosticRoots.clear();
+    });
+  }
+
+  function startComposerDiagnostics() {
+    queueComposerDiagnosticScan(document);
+
+    const observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type === 'attributes') {
+          const target = mutation.target;
+          const semanticAttribute =
+            mutation.attributeName !== 'style' && mutation.attributeName !== 'hidden';
+          if (semanticAttribute || target.matches(COMPOSER_PROBE_SELECTOR)) {
+            queueComposerDiagnosticScan(target);
+          }
+          continue;
+        }
+        for (const node of mutation.addedNodes) {
+          if (!(node instanceof Element)) continue;
+          if (
+            node.matches(COMPOSER_PROBE_SELECTOR) ||
+            node.querySelector(COMPOSER_PROBE_SELECTOR)
+          ) {
+            queueComposerDiagnosticScan(node);
+          }
+        }
+      }
+    });
+
+    observer.observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['id', 'contenteditable', 'role', 'aria-multiline', 'hidden', 'style'],
+    });
+
+    window.setTimeout(() => {
+      logComposerElementsWithin(document);
+      if (!hasDetectedComposer) {
+        logWarn(
+          'ページ読み込み後 15 秒以内に ChatGPT の入力欄 DOM を検出できませんでした。',
+          'チャット画面を開いている場合は入力欄の DOM 構造が変わった可能性があります。',
+          '再確認: document.dispatchEvent(new CustomEvent("' + SELF_TEST_EVENT + '"))'
+        );
+      }
+    }, 15000);
+  }
 
   function selfTest() {
     const probes = [];
@@ -716,13 +865,13 @@
         nodes = [];
       }
       const first = nodes[0] || null;
-      const ok = first ? isComposerInput(first) : false;
-      if (ok && !accepted) accepted = first;
+      const firstAccepted = nodes.find((node) => isComposerInput(node)) || null;
+      if (firstAccepted && !accepted) accepted = firstAccepted;
       probes.push({
         selector,
         count: nodes.length,
-        element: describeTarget(first),
-        accepted: ok,
+        element: describeTarget(firstAccepted || first),
+        accepted: Boolean(firstAccepted),
       });
     }
 
@@ -735,11 +884,14 @@
       version: VERSION,
       url: location.href,
       config: {
+        world: 'MAIN',
         runAt: 'document_start',
         logLevel: logLevel(),
         strategy: enterStrategy(),
         verifyNewline: verifyNewlineEnabled(),
       },
+      // DevTools から直接 inspect できるよう、文字列化せず実要素も含める。
+      composerElement: accepted,
       composer: probes,
       sendButton: {
         via: found.via,
@@ -770,8 +922,7 @@
     return report;
   }
 
-  // ページ側から呼べる入口（isolated world の関数は DevTools の
-  // 「JavaScript console context」で本拡張を選ぶと直接呼べる）
+  // MAIN world なのでページの DevTools console から直接呼べる診断用入口。
   window.__chatgptEnterKeySelfTest = selfTest;
   window.__chatgptEnterKeyStats = () => Object.assign({}, stats);
   window.__chatgptEnterKeyVersion = VERSION;
@@ -779,11 +930,17 @@
     selfTest();
   });
 
+  if (document.documentElement) {
+    startComposerDiagnostics();
+  } else {
+    document.addEventListener('DOMContentLoaded', startComposerDiagnostics, { once: true });
+  }
+
   // 注入自体が効いていることの証（ページ読み込み時に 1 行だけ）
   logInfo(
     'v' +
       VERSION +
-      ' 読み込み完了 (run_at=document_start): Enter=改行 / Ctrl+Enter・Cmd+Enter=送信 / ' +
+      ' 読み込み完了 (world=MAIN, run_at=document_start): Enter=改行 / Ctrl+Enter・Cmd+Enter=送信 / ' +
       'Shift+Enter=既定動作 / Alt+Enter=非干渉。Enter 方針=' +
       enterStrategy() +
       '（切り替え: localStorage.setItem("' +
