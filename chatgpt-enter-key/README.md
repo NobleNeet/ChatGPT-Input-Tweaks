@@ -19,6 +19,12 @@ chatgpt-enter-key/
 ├── manifest.json   # MV3 定義。content_scripts で chatgpt.com に content.js を注入するだけ
 ├── content.js      # 全ロジック（入力欄判定 / IME 判定 / Enter・Ctrl+Enter 処理）
 └── README.md       # 本ファイル
+
+docs/
+└── chatgpt-dom-sample.txt          # 実 ChatGPT DOM の参考サンプル（判定の根拠にはしない）
+
+tests/
+└── composer-detection.test.mjs     # 入力欄判定の静的自動テスト（jsdom。§7）
 ```
 
 ### content.js の仕組み（要点）
@@ -39,13 +45,22 @@ chatgpt-enter-key/
 - **入力欄の判定（イベント委譲）**: 要素参照は一切保持せず、毎回 `event.target`
   （またはその祖先）が ChatGPT の入力欄かを判定する。SPA で DOM が再生成されても成立する。
   - 実入力欄は `textarea` ではなく ProseMirror の `contenteditable="true"` div。
-    `id="prompt-textarea"`、または `contenteditable="true"` + `role="textbox"` +
-    `aria-multiline="true"` に「composer 内部」か「fallback textarea の兄弟」という条件を
-    組み合わせ、一般の textbox だけでは対象にしない。
+    判定は「編集可能か」＋「ChatGPT composer 固有の強い根拠」に分離している。
+    - 編集可能: `isContentEditable`（`contenteditable`）
+    - 強い根拠（いずれか 1 つ）: `id="prompt-textarea"` ／ composer コンテナ
+      （`#composer`・`[data-testid="composer"]`・`[data-test-id="composer"]`・`.composer-sender`）内部
+      ／ 同一または近傍（実入力欄から上 2 階層・その容器から下 2 階層まで）の
+      `name="prompt-textarea"` fallback
+    - `role="textbox"` と `aria-multiline="true"` は**必須条件ではない**（補助シグナル）。
+      改版でこれらの ARIA 属性が消えても実入力欄を検出し続けられる。
+      逆に、ARIA 属性だけを根拠に受理する経路は無い ＝ 一般の
+      `contenteditable="true" role="textbox" aria-multiline="true"` を無条件には対象にしない。
   - 否定条件: 非表示要素（`[hidden]`・`[aria-hidden="true"]`・`getClientRects()` 空・
     `checkVisibility()` false）、**`name="prompt-textarea"` の fallback `textarea`**、
     検索欄（`[role=searchbox]`・`input[type=search]`・`input[name=search]`）、
-    コード編集域（CodeMirror / Monaco / `[role=code]`）。
+    コード編集域（CodeMirror / Monaco / `[role=code]`）、
+    `password` / `number` / `tel` / `url` / `email` 等の別目的 input。
+    これらは強い根拠があっても介入しない（除外が先に効く）。
   - 生成された class 名（`wcDTda_*` など）と `aria-label` は**入力欄判定に一切使わない**
     （`aria-label` は送信ボタン候補の最終フォールバックのみ）。
 - **IME 対策**: `event.isComposing`、`event.keyCode === 229`、
@@ -54,6 +69,25 @@ chatgpt-enter-key/
 - **不良検知ログ**: 操作結果を `console` に出す（`[ChatGPT Enter Key]` 接頭辞）。
   読み込み後に検出した入力欄の **DOM 要素そのもの**も自動表示する。
   SPA が入力欄を作り直した場合は、新しい要素を再度表示する。詳細は §4。
+
+### 入力欄判定の受け入れ／拒否ケース
+
+`isComposerInput()` は「編集可能か（`isContentEditableLike`）」と
+「composer 固有の強い根拠（`hasStrongComposerIdentity`）」を分けて評価する。
+ARIA 属性（`role="textbox"` / `aria-multiline="true"`）は補助シグナルで、判定の可否を変えない。
+
+| DOM | 受理 | 理由 |
+| --- | --- | --- |
+| `<div id="prompt-textarea" contenteditable="true" role="textbox" aria-multiline="true">` | ○ | 現行構造。ID＋ARIA |
+| `<div id="prompt-textarea" contenteditable="true">` | ○ | ARIA 属性が消えても ID が強い根拠 |
+| `<div contenteditable="true" role="textbox" aria-multiline="true">`（composer コンテナ内部、または近傍に `name="prompt-textarea"` fallback） | ○ | 強い根拠がコンテナ／fallback |
+| `<div contenteditable="true" role="textbox" aria-multiline="true">`（composer と無関係） | × | 強い根拠が無い一般編集域 |
+| `<div contenteditable="true" role="textbox" aria-multiline="true" class="cm-content">` | × | CodeMirror は明示除外 |
+| `<textarea name="prompt-textarea" style="display:none">` | × | 非表示 fallback は明示除外 |
+| 検索欄（`[role=searchbox]` / `input[type=search]` / `input[name=search]`）、Canvas 内要素 | × | 明示除外／非描画 |
+
+この矩阵は自動テストに落としてある（リポジトルートで `node tests/composer-detection.test.mjs`、
+後述 §7）。実装側の変更に強い根拠を追加しない限り、ARIA 属性だけを対象に受理する経路は追加しないこと。
 
 ## 2. Vivaldi への読み込み手順
 
@@ -88,7 +122,12 @@ chatgpt-enter-key/
 - [ ] `Enter` 改行が ChatGPT 側の状態に反映され、送信時に改行として届く
 - [ ] `Ctrl+Z` などの Undo / Redo、ペースト後の改行が壊れない
 - [ ] ページ遷移（新規チャット・履歴選択）後もそのまま機能する
-- [ ] Console に `[ChatGPT Enter Key] v0.9.0 読み込み完了 (world=MAIN, run_at=document_start) ... Enter 方針=remapToShiftEnter` が 1 行だけ出ている（＝注入されている）
+- [ ] Console に `[ChatGPT Enter Key] v0.9.1 読み込み完了 (world=MAIN, run_at=document_start) ... Enter 方針=remapToShiftEnter` が 1 行だけ出ている（＝注入されている）
+- [ ] `window.__chatgptEnterKeyProbe('#prompt-textarea')` が `accepted: true`、
+      `evidence.promptId: true`、`evidence.inComposerContainer: true` を返す
+      （`evidence.ariaRich` は現行 DOM では true だが、これが false でも受理されるはず＝ARIA 非依存）
+- [ ] `window.__chatgptEnterKeyProbe('textarea[name="prompt-textarea"]')` が `accepted: false`
+      （非表示 fallback には介入しない）
 - [ ] Console に `ChatGPT の入力欄 DOM を検出しました:` と実際の `div#prompt-textarea` 要素が表示され、展開・inspect できる
 - [ ] チャット画面で 15 秒待っても `入力欄 DOM を検出できませんでした` という警告が出ない
 - [ ] `Enter` 押下で `Enter → 改行（...）` が 1 行だけ追加され、**文章タイプ中は無出力**のまま
@@ -143,14 +182,16 @@ document.dispatchEvent(new CustomEvent('chatgptEnterKeySelfTest'));
 （`via`: `selector` / `name` / `disabled` / `none`）を 1 件のオブジェクトで返す。
 DevTools の context で本拡張を選べば `__chatgptEnterKeySelfTest()`（同じ内容）や
 `__chatgptEnterKeyStats()`（操作回数カウンタ）も直接呼べる。
+特定要素だけが対象になっているかは `__chatgptEnterKeyProbe('#prompt-textarea')` で、
+受理可否とその内訳（`evidence`）がその場で確認できる。
 
 ### 「効かない」ときの読み方
 
 | 症状 | ログの征兆 | 対応 |
 | --- | --- | --- |
-| そもそも効いていない | `v0.9.0 読み込み完了` が出ていない | 拡張カードの更新後、タブを完全に閉じて開き直す／拡張が有効か／`chatgpt.com` か |
+| そもそも効いていない | `v0.9.1 読み込み完了` が出ていない | 拡張カードの更新後、タブを完全に閉じて開き直す／拡張が有効か／`chatgpt.com` か |
 | **`Enter` が送信される（ログは出ている）** | `remappedShiftKey` を確認 | `true` でなければイベント変更に失敗。誤送信防止の停止処理が働く |
-| `Enter` で改行されない | `Enter` に対するログが 1 行も無い | 入力欄を特定できていない。自己診断で `accepted: false` ばかりなら `isComposerInput` の条件を更新 |
+| `Enter` で改行されない | `Enter` に対するログが 1 行も無い | 入力欄を特定できていない。自己診断で `accepted: false` ばかりなら `window.__chatgptEnterKeyProbe('#prompt-textarea')` の `evidence` でどの根拠が消えているか確認し、`isComposerInput` の条件を更新 |
 | 改行だけ増えない | `Enter 操作後も composer の DOM が変わっていません` | 詳細ログを有効にし、`remappedShiftKey: true` と keypress / keyup の引き継ぎを確認する |
 | `Ctrl+Enter` で送信されない | `Ctrl+Enter: 送信ボタンが見つからず素通し` | 自己診断の `sendButton.via` が `none` なら `SEND_BUTTON_SELECTORS` に実 DOM のセレクタを追加 |
 | 送信はされるが warn 付き | `名称一致（aria-label / title 等）で送信しました` | セレクタ配列が死んでいる。上記追加でフォールバックを外す |
@@ -188,6 +229,12 @@ getEventListeners(document.getElementById('prompt-textarea')).keydown;
 ## 5. 既知の弱点
 
 - **DOM 依存**: `#prompt-textarea`、`#composer`、`data-testid="compose-send-button"` は ChatGPT の改版で変わると検出に失敗する。その場合 `Ctrl+Enter` は無害に素通しされ、`Enter` の改行化も効かないことがある。
+  入力欄判定は `role="textbox"` / `aria-multiline="true"` に依存していないが、
+  強い根拠 3 系統（`id="prompt-textarea"`／composer コンテナ／近傍の `name="prompt-textarea"` fallback）が
+  同時に消えると検出できない。その場合は自己診断の `composerEvidence` が全て `false` になる。
+  「近傍」には上限（実入力欄から上 2 階層・その容器から下 2 階層）を置いていて、
+  body / html まで遡ると本文側の別編集域が composer の fallback を誤って拾ってしまうため
+  （上限を緩めると誤検知、厳しくすると改版で fallback ルートが落ちる）。
 - **イベント属性の変更に依存**: 既定方針は元のKeyboardEventの `shiftKey` を変更する。ChromiumやChatGPTが内部の修飾キー状態だけを参照する実装へ変わると効かなくなる可能性がある。その場合も変換失敗を検出できれば誤送信防止を優先する。
 - **MAIN world**: ChatGPT本体と同じ実行環境で動くためイベント阻止は確実になるが、ページ側JavaScriptから拡張のグローバル診断関数が見える。機密情報や拡張APIは使用していない。
 - **候補一覧との相互作用**: 既定方針ではEnterがShift+Enterとして見えるため、スラッシュコマンドや@言及の候補一覧でEnter決定できなくなる可能性がある。
@@ -200,7 +247,8 @@ getEventListeners(document.getElementById('prompt-textarea')).keydown;
 - **`Ctrl+Enter` の探索範囲**: 送信ボタンを「composerコンテナ → form → 最大6階層の近い祖先」の順で探す。さらに外側へ移動すると検出に失敗する（その場合は無害に素通し）。
 - **ログの出力量**: 既定（`info`）ではページ読み込み時、入力欄 DOM の初回検出時、`Enter` 操作時に出力する。SPA が入力欄を作り直すと新要素をもう一度出す。入力テキスト・送信内容などの**内容は明示的には出力しない**が、DevTools に表示した DOM 要素を展開すると、その時点の子ノード（入力内容を含む場合がある）を確認できる。
 - **警告ヒューリスティクス**: 「入力欄を特定できない」警告は 10 秒以内に 4 回 Enter を押した時だけ 1 回出す。検索欄・CodeMirror・非表示 fallback など明示的に除外した要素は数えないが、除外に含まれない contenteditable を連打すると誤警告しうる（実害はなく、再読み込みや正常な Enter で条件は解除される）。
-- **testing**: 実際の DOM に対する自動テストは未実施（ブラウザ手動テストのみ）。
+- **testing**: 入力欄判定ロジックの静的自動テストは `tests/composer-detection.test.mjs`（jsdom）。
+  実際の ChatGPT DOM・実キー入力に対するブラウザ自動テストは未実施（§3 の手動 GUI テストのみ）。
 
 ## 6. 補足
 
@@ -208,7 +256,31 @@ getEventListeners(document.getElementById('prompt-textarea')).keydown;
 - 設定項目は意図的に無い。挙動を変えたい場合は `content.js` 冒頭の定数
   （`SEND_GUARD_MS` / `IME_GRACE_MS`）やセレクタ配列を直接編集する。
 - セレクタが合わなくなったときは、ChatGPT 側の composer 付近を DevTools で複製して
-  リポジトリルートの `docs/chatgpt-composer-dom.txt` に保存しておくと、
+  リポジトリルートの `docs/chatgpt-dom-sample.txt` に保存しておくと、
   入力欄・送信ボタンの候補を更新する足がかりになる。
   ※ DOM サンプルは「現時点の実装の参考」であり、将来も同一 DOM である前提にはしていない
-  （生成 class 名・`aria-label` に依存しない設計にしてある）。
+  （生成 class 名・`aria-label`・`role` / `aria-multiline` に依存しない設計にしてある）。
+
+## 7. 入力欄判定の自動テスト（静的）
+
+実ブラウザを使わず、判定ロジックだけを jsdom 上で検証する。
+
+```sh
+npm install          # devDependency: jsdom のみ
+npm test             # = node tests/composer-detection.test.mjs
+```
+
+`tests/composer-detection.test.mjs` は `chatgpt-enter-key/content.js` をそのまま jsdom に
+読み込み、`window.__chatgptEnterKeyProbe()` 経由で次の受け入れ／拒否矩阵を確かめる
+（§1 の表と同じケース集合＋ ARIA 属性の有無を振った差分）。
+
+- 受理: 現行構造／`role`・`aria-multiline` を消した将来構造／composer コンテナ内部／
+  近傍に `name="prompt-textarea"` fallback／旧 textarea 構成（可視＋送信ボタンのある form）
+- 拒否: 非表示 fallback／CodeMirror・Monaco・`[role=code]`／検索欄／`aria-hidden`・非表示／
+  `password` 等の別目的 input／Canvas／composer と無関係な `contenteditable`（ARIA 属性があっても）
+- その他: ARIA 属性の有無で合否が変わらないこと、自己診断が投げずに `composerEvidence` を返すこと、
+  判定処理自体がコンソールログを増やさないこと、`content.js` の `VERSION` が `manifest.json` と一致すること
+
+jsdom に `isContentEditable` と `getClientRects()` の実装が無いため、テスト側でブラウザの挙動を
+再現している（`content.js` 側は触らない）。実キー入力（Enter／Ctrl+Enter）や実 ChatGPT DOM の
+確認は §3 の手動テストで行うこと。

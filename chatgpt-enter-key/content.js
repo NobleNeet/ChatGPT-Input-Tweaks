@@ -21,9 +21,11 @@
  *   - 送信ボタンが見つからない場合はイベントを素通しする（暴走防止）。
  *   - 入力欄は textarea ではなく ProseMirror の contenteditable div。
  *     生成された class 名（wcDTda_* 等）と aria-label には依存しない。
+ *     role="textbox" / aria-multiline="true" も**必須条件ではない**（補助シグナル扱い）。
  *   - 不良検知用のログを出す（既定 info / localStorage 'chatgptEnterKeyLogLevel' で切替）。
  *     通常タイピングでは無出力。入力内容そのものは出力しない。
  *     自己診断: document.dispatchEvent(new CustomEvent('chatgptEnterKeySelfTest'))
+ *     要素単位の判定確認: window.__chatgptEnterKeyProbe('#prompt-textarea')
  */
 (() => {
   'use strict';
@@ -51,11 +53,26 @@
     '.composer-sender',
   ].join(', ');
 
+  // 実入力欄と同じコンテナに置かれる非表示 fallback（これ自体は対象にしない）
+  const PROMPT_FALLBACK_SELECTORS = [
+    'textarea[name="prompt-textarea"]',
+    'input[name="prompt-textarea"]',
+  ];
+
+  // 改版でラッパーが増えた場合の保険として、fallback を実入力欄の「近傍」から探す。
+  // 近傍 = 実入力欄から最大 2 階層上までの容器の中（その容器から見て孫までの深さ）。
+  // 上・下とも浅く上限を置くのは、body / html まで遡ると本文側の別編集域が
+  // ページ全体の fallback を拾ってしまうため（＝誤検知）。現行 DOM は同親＝上0・下1。
+  const PROMPT_FALLBACK_ANCESTOR_DEPTH = 2;
+  const PROMPT_FALLBACK_NEARBY_QUERY = PROMPT_FALLBACK_SELECTORS.flatMap((base) => [
+    ':scope > ' + base,
+    ':scope > * > ' + base,
+  ]).join(', ');
+
   // 誤検知してはいけない入力 UI（検索欄・コードエディタ・非表示 fallback など）
   const EXCLUDED_SELECTOR = [
     // 非表示の fallback textarea（実入力欄と同じ親要素に置かれる）
-    'textarea[name="prompt-textarea"]',
-    'input[name="prompt-textarea"]',
+    ...PROMPT_FALLBACK_SELECTORS,
     '[aria-hidden="true"]',
     '[hidden]',
     // 検索欄系
@@ -103,7 +120,7 @@
   //     localStorage.setItem('chatgptEnterKeyLogLevel', 'off')     // 無音
   //   自己診断（セレクタが生きているか等）:
   //     document.dispatchEvent(new CustomEvent('chatgptEnterKeySelfTest'))
-  const VERSION = '0.9.0';
+  const VERSION = '0.9.1';
   const LOG_TAG = '[ChatGPT Enter Key]';
   const LOG_STORAGE_KEY = 'chatgptEnterKeyLogLevel';
   const SELF_TEST_EVENT = 'chatgptEnterKeySelfTest';
@@ -283,7 +300,7 @@
 
   // ---- 入力欄の判定 --------------------------------------------------------
   //
-  // 実 DOM（docs/chatgpt-composer-dom.txt 参照）では入力欄は
+  // 実 DOM（docs/chatgpt-dom-sample.txt 参照）では入力欄は
   //   <div id="prompt-textarea" contenteditable="true" role="textbox"
   //        aria-multiline="true" class="ProseMirror ...">
   // で、textarea ではない。同じ親には name="prompt-textarea" の
@@ -292,6 +309,12 @@
   // 判定はすべて event.target から都度行う（SPA で DOM が再生成されるため
   // 要素参照を保持しない）。生成された class 名（wcDTda_* 等）と aria-label は
   // 判定に使わない。
+  //
+  // ARIA 属性（role="textbox" / aria-multiline="true"）は必須条件ではない。
+  // 改版でこれらの属性が消えても実入力欄を捕らえ続けられるよう、contenteditable を
+  // 受理する条件は「ChatGPT composer 固有の強い根拠」（hasStrongComposerIdentity）に置く。
+  // ARIA 属性は補助シグナルとして診断ログ・自己診断に記録するだけで、
+  // ARIA 属性だけを根拠に受理する経路は意図的に無い（一般の contenteditable 対策）。
 
   // keydown の target は編集域そのものか、その内部要素になり得る。外側へ探す。
   function findEditableAncestor(node) {
@@ -327,18 +350,71 @@
     return true;
   }
 
-  // 現行 ProseMirror composer の特徴量（生成 class には依存しない）
-  function looksLikeRichComposer(el) {
-    return (
-      el.isContentEditable === true &&
-      el.getAttribute('role') === 'textbox' &&
-      el.getAttribute('aria-multiline') === 'true'
-    );
+  // 富テキスト編集域か。ARIA 属性には依存しない（改版で role が消えても成立する）。
+  function isContentEditableLike(el) {
+    return el.isContentEditable === true;
   }
 
-  function hasPromptFallbackSibling(el) {
-    const parent = el.parentElement;
-    return Boolean(parent && parent.querySelector('textarea[name="prompt-textarea"]'));
+  // ARIA 上はリッチな複数行テキストボックスに見える、という補助シグナル。
+  // 単独では受理しない（ChatGPT composer と一般の編集領域を区別できないため）。
+  function hasRichTextboxSemantics(el) {
+    return el.getAttribute('role') === 'textbox' && el.getAttribute('aria-multiline') === 'true';
+  }
+
+  // 同一（または近傍）コンテナに非表示 fallback があるか。
+  // 現行 DOM では実入力欄と同親。改版でラッパーが増えた場合に備え浅い階層まで遡るが、
+  // body / html まで遡らないこと、fallback 自身や fallback を内包する要素が
+  // 自己参照して通らないことを条件にしている。
+  function hasPromptFallbackNearby(el) {
+    let container = el.parentElement;
+    for (let depth = 0; container && depth < PROMPT_FALLBACK_ANCESTOR_DEPTH; depth += 1) {
+      // ページ全体まで遡ると本文側の別編集域が composer の fallback を拾う
+      if (container === document.body || container === document.documentElement) break;
+      let fallback = null;
+      try {
+        fallback = container.querySelector(PROMPT_FALLBACK_NEARBY_QUERY);
+      } catch (_) {
+        fallback = null; // 将来の selector が構文エラーでも続行
+      }
+      if (fallback && fallback !== el && !el.contains(fallback)) return true;
+      container = container.parentElement;
+    }
+    return false;
+  }
+
+  // ChatGPT の composer であることを示す強い根拠（ARIA 属性はここで使わない）。
+  function hasStrongComposerIdentity(el) {
+    // 本命 ID。改版で role / aria-multiline が消えても効く。
+    if (el.id === 'prompt-textarea') return true;
+    // 現行コードが利用している semantic composer container の内部。
+    if (isInsideComposer(el)) return true;
+    // 同一または近傍コンテナに prompt fallback がある（現行 DOM の構成）。
+    if (hasPromptFallbackNearby(el)) return true;
+    return false;
+  }
+
+  // contenteditable を ChatGPT の composer として扱ってよいか。
+  // 「編集可能」＋「強い根拠」だけで判定し、role / aria-multiline が無くても受理する。
+  // 逆に強い根拠が無い一般の contenteditable は、ARIA 属性が揃っていても拒否する。
+  function isLikelyChatGptComposer(el) {
+    return isContentEditableLike(el) && hasStrongComposerIdentity(el);
+  }
+
+  // 診断用: なぜ受理（または拒否）したかを属性レベルで切り分ける。
+  // 判定そのものには使わず、警告ログ・自己診断・window.__chatgptEnterKeyProbe に出す。
+  function composerEvidence(el) {
+    if (!el || typeof el.getAttribute !== 'function') return null;
+    return {
+      element: describeTarget(el),
+      editable: isContentEditableLike(el),
+      ariaRich: hasRichTextboxSemantics(el), // 補助シグナル（必須ではない）
+      promptId: el.id === 'prompt-textarea',
+      inComposerContainer: isInsideComposer(el),
+      promptFallbackNearby: hasPromptFallbackNearby(el),
+      excluded: el.matches(EXCLUDED_SELECTOR) || Boolean(el.closest(EXCLUDED_SELECTOR)),
+      rendered: isRendered(el),
+      disabled: el.disabled === true,
+    };
   }
 
   // この編集域へ Enter を介入してよいか否か
@@ -351,28 +427,20 @@
     const isTextControl =
       tag === 'textarea' ||
       (tag === 'input' && TEXT_INPUT_TYPES.has(el.getAttribute('type') || 'text'));
-    const isRich = el.isContentEditable === true;
+    const isRich = isContentEditableLike(el);
     if (!isTextControl && !isRich) return false;
 
     // 明示的に除外（自分自身および祖先を含む）
     if (el.matches(EXCLUDED_SELECTOR) || el.closest(EXCLUDED_SELECTOR)) return false;
 
-    // 肯定条件 1: 本命 ID。改版で role / aria-multiline が消えても効くようにする。
-    // tag 実体（contenteditable div）であることを条件に含め、同名の fallback を寄せ付けない。
-    if (el.id === 'prompt-textarea' && looksLikeRichComposer(el)) return true;
+    // 富テキスト編集域: composer 固有の強い根拠があれば ARIA 属性の有無を問わない。
+    // （isLikelyChatGptComposer は contenteditable 実体しか通さないため、
+    //   id / name が同名の fallback textarea はこの経路に寄せ付けない）
+    if (isRich) return isLikelyChatGptComposer(el);
 
-    // 肯定条件 2: 現行 DOM の rich editor + 非表示 fallback textarea の組み合わせ
-    if (looksLikeRichComposer(el) && hasPromptFallbackSibling(el)) return true;
-
-    // 肯定条件 3: composer コンテナ配下の rich textbox
-    if (looksLikeRichComposer(el) && isInsideComposer(el)) return true;
-
-    // 肯定条件 4: 旧 textarea 構成向け。可視かつ「送信らしきボタンのある form」に限る
-    if (isTextControl) {
-      const scope = el.closest('form') || (isInsideComposer(el) ? el.parentElement : null);
-      return Boolean(scope) && findSendButton(scope).button !== null;
-    }
-    return false;
+    // 旧 textarea 構成向け。可視かつ「送信らしきボタンのある form」に限る
+    const scope = el.closest('form') || (isInsideComposer(el) ? el.parentElement : null);
+    return Boolean(scope) && findSendButton(scope).button !== null;
   }
 
   // Ctrl+Enter の送信対象を辿るスコープ。
@@ -508,11 +576,13 @@
         ' 秒間に ' +
         recentMisses.length +
         ' 回 Enter を押しましたが、入力欄を composer として特定できませんでした。',
-      '入力欄の構造が改版で変わった可能性があります（現行条件: ' +
-        '#prompt-textarea かつ rich / rich textbox + fallback textarea の兄弟 / composer コンテナ配下の rich textbox）。',
+      '入力欄の構造が改版で変わった可能性があります（現行条件: contenteditable かつ ' +
+        '#prompt-textarea / composer コンテナ配下 / 近傍に fallback textarea のいずれか。' +
+        'role="textbox" と aria-multiline="true" は必須ではない）。',
       {
         target: describeTarget(event.target),
         nearestEditable: describeTarget(editable),
+        evidence: composerEvidence(editable),
       },
       '自己診断は: document.dispatchEvent(new CustomEvent("' + SELF_TEST_EVENT + '"))'
     );
@@ -552,6 +622,7 @@
       logDebug('Enter: 対象外（入力欄と特定できず）→ 非干渉', {
         target: describeTarget(event.target),
         editable: describeTarget(editable),
+        evidence: composerEvidence(editable),
       });
       return;
     }
@@ -892,6 +963,8 @@
       },
       // DevTools から直接 inspect できるよう、文字列化せず実要素も含める。
       composerElement: accepted,
+      // 受理（または拒否）の理由を属性レベルに切り分けたもの
+      composerEvidence: composerEvidence(accepted),
       composer: probes,
       sendButton: {
         via: found.via,
@@ -925,6 +998,29 @@
   // MAIN world なのでページの DevTools console から直接呼べる診断用入口。
   window.__chatgptEnterKeySelfTest = selfTest;
   window.__chatgptEnterKeyStats = () => Object.assign({}, stats);
+  // 任意要素が「今この瞬間の DOM」で composer として受理されるかの確認（診断用）。
+  //   window.__chatgptEnterKeyProbe(document.getElementById('prompt-textarea'))
+  //   window.__chatgptEnterKeyProbe('#prompt-textarea')
+  window.__chatgptEnterKeyProbe = (target) => {
+    let el = target;
+    if (typeof target === 'string') {
+      try {
+        el = document.querySelector(target);
+      } catch (_) {
+        el = null;
+      }
+    }
+    // keydown ハンドラと同じ解決経路（編集域そのものでない target は外側へ探す）
+    const editable = (el && !isContentEditableLike(el) ? findEditableAncestor(el) : null) || el;
+    return {
+      version: VERSION,
+      element: describeTarget(el),
+      resolved: describeTarget(editable),
+      accepted: isComposerInput(editable),
+      // accepted の内訳。ariaRich は補助シグナルで、true でも単独では受理しない
+      evidence: composerEvidence(editable),
+    };
+  };
   window.__chatgptEnterKeyVersion = VERSION;
   document.addEventListener(SELF_TEST_EVENT, () => {
     selfTest();

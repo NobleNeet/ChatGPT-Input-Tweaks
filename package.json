@@ -1,0 +1,11 @@
+{
+  "name": "chatgpt-input-tweaks-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node tests/composer-detection.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^30.0.1"
+  }
+}
