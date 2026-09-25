@@ -47,6 +47,7 @@
 
   // composer 全体を指し得るコンテナ候補（バージョン差分対策）
   const COMPOSER_CONTAINER_SELECTOR = [
+    '[data-chatgpt-composer]',
     '#composer',
     '[data-testid="composer"]',
     '[data-test-id="composer"]',
@@ -62,7 +63,7 @@
   // 改版でラッパーが増えた場合の保険として、fallback を実入力欄の「近傍」から探す。
   // 近傍 = 実入力欄から最大 2 階層上までの容器の中（その容器から見て孫までの深さ）。
   // 上・下とも浅く上限を置くのは、body / html まで遡ると本文側の別編集域が
-  // ページ全体の fallback を拾ってしまうため（＝誤検知）。現行 DOM は同親＝上0・下1。
+  // ページ全体の fallback を拾ってしまうため（＝誤検知）。旧 DOM は同親＝上0・下1。
   const PROMPT_FALLBACK_ANCESTOR_DEPTH = 2;
   const PROMPT_FALLBACK_NEARBY_QUERY = PROMPT_FALLBACK_SELECTORS.flatMap((base) => [
     ':scope > ' + base,
@@ -300,11 +301,10 @@
 
   // ---- 入力欄の判定 --------------------------------------------------------
   //
-  // 実 DOM（docs/chatgpt-dom-sample.txt 参照）では入力欄は
-  //   <div id="prompt-textarea" contenteditable="true" role="textbox"
-  //        aria-multiline="true" class="ProseMirror ...">
-  // で、textarea ではない。同じ親には name="prompt-textarea" の
-  // 非表示 fallback textarea があり、それは対象にしない。
+  // 現行 DOM（docs/chatgpt-dom-sample.txt 参照）では入力欄は
+  //   <form data-chatgpt-composer><div contenteditable="true" ...></div></form>
+  // 内にある。旧 DOM の id="prompt-textarea" や非表示 fallback textarea も
+  // 後方互換の根拠として扱う（fallback 自体は対象にしない）。
   //
   // 判定はすべて event.target から都度行う（SPA で DOM が再生成されるため
   // 要素参照を保持しない）。生成された class 名（wcDTda_* 等）と aria-label は
@@ -362,7 +362,7 @@
   }
 
   // 同一（または近傍）コンテナに非表示 fallback があるか。
-  // 現行 DOM では実入力欄と同親。改版でラッパーが増えた場合に備え浅い階層まで遡るが、
+  // 旧 DOM では実入力欄と同親。改版でラッパーが増えた場合に備え浅い階層まで遡るが、
   // body / html まで遡らないこと、fallback 自身や fallback を内包する要素が
   // 自己参照して通らないことを条件にしている。
   function hasPromptFallbackNearby(el) {
@@ -384,11 +384,11 @@
 
   // ChatGPT の composer であることを示す強い根拠（ARIA 属性はここで使わない）。
   function hasStrongComposerIdentity(el) {
-    // 本命 ID。改版で role / aria-multiline が消えても効く。
+    // 旧 DOM の ID。role / aria-multiline が消えても効く。
     if (el.id === 'prompt-textarea') return true;
-    // 現行コードが利用している semantic composer container の内部。
+    // 現行の data-chatgpt-composer または旧 semantic composer container の内部。
     if (isInsideComposer(el)) return true;
-    // 同一または近傍コンテナに prompt fallback がある（現行 DOM の構成）。
+    // 同一または近傍コンテナに prompt fallback がある（旧 DOM の構成）。
     if (hasPromptFallbackNearby(el)) return true;
     return false;
   }
@@ -452,7 +452,7 @@
       const semanticScope = el.closest(COMPOSER_CONTAINER_SELECTOR) || el.closest('form');
       if (semanticScope) return semanticScope;
 
-      // 現行DOMでform等が無い場合、送信ボタンを含む最も近い祖先まで限定的に辿る。
+      // 旧DOMのようにform等が無い場合、送信ボタンを含む最も近い祖先まで限定的に辿る。
       let scope = el.parentElement;
       for (let depth = 0; scope && depth < 6; depth += 1) {
         const found = findSendButton(scope);

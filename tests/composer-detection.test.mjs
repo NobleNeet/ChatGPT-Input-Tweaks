@@ -104,8 +104,19 @@ function loadExtension() {
 
 // ---- 固定句（現行 DOM サンプルと、改版で変わりそうな DOM） ----------------
 
-// 現行構造（docs/chatgpt-dom-sample.txt 相当）。class 名はわざと実物に近いものを使う。
+// 現行構造: ID・旧コンテナ・fallback はない。class と aria-label は判定根拠にしない。
 const CURRENT = `
+  <form class="relative flex flex-col gap-2" data-composer-placement="home"
+        data-chatgpt-composer="" data-thread-find-composer="true">
+    <div contenteditable="true" aria-multiline="true" role="textbox"
+         class="ProseMirror" data-composer-markdown="" aria-label="ChatGPT に聞く"
+         data-virtualkeyboard="true"><p><br></p></div>
+    <button type="button" aria-label="停止"></button>
+    <button type="submit" aria-label="送信">送信</button>
+  </form>`;
+
+// 旧構造（docs/chatgpt-dom-sample.txt の旧サンプル相当）。
+const LEGACY = `
   <div id="composer" data-testid="composer">
     <div class="wcDTda_prosemirror-parent text-token-text-primary">
       <textarea name="prompt-textarea" aria-label="ChatGPT とチャットする" style="display: none;"></textarea>
@@ -152,6 +163,11 @@ const FALLBACK_TOO_FAR = `
 
 // composer と同じページに同居する、無関係な本文側編集域
 const COMPOSER_AND_COMMENT = `
+  ${CURRENT}
+  <div class="comment-box">
+    <div contenteditable="true" role="textbox" aria-multiline="true"><p><br></p></div>
+  </div>`;
+const LEGACY_COMPOSER_AND_COMMENT = `
   <div id="composer" data-testid="composer">
     <div class="wcDTda_prosemirror-parent">
       <textarea name="prompt-textarea" style="display: none;"></textarea>
@@ -177,7 +193,10 @@ function withoutAria(html) {
 
 // 受理されるべきケース
 export const ACCEPT_CASES = [
-  { name: '現行構造: #prompt-textarea + contenteditable + ARIA', html: CURRENT, find: '#prompt-textarea', expect: true },
+  { name: '現行構造: data-chatgpt-composer 内の contenteditable（ID・fallback なし）', html: CURRENT, find: 'div[contenteditable="true"]', expect: true },
+  { name: '旧構造: #prompt-textarea + contenteditable + ARIA', html: LEGACY, find: '#prompt-textarea', expect: true },
+  { name: '現行コンテナ内は class・aria-label なしでも受理', html: '<form data-chatgpt-composer><div contenteditable="true"></div></form>', find: 'div[contenteditable="true"]', expect: true },
+  { name: '旧 data-test-id コンテナも受理', html: '<div data-test-id="composer"><div contenteditable="true"></div></div>', find: 'div[contenteditable="true"]', expect: true },
   { name: '将来構造: #prompt-textarea + contenteditable（ARIA 削除）', html: FUTURE_NO_ARIA, find: '#prompt-textarea', expect: true },
   { name: '将来構造: ARIA 削除 + data-testid 削除（fallback 同親）', html: FUTURE_NO_TESTID, find: 'div.ProseMirror', expect: true },
   { name: '将来構造: ARIA 削除 + fallback が 1 階層上のラッパー', html: FUTURE_FALLBACK_ONE_UP, find: 'div.ProseMirror', expect: true },
@@ -221,12 +240,18 @@ export const ACCEPT_CASES = [
 
 // 拒否されるべきケース（誤検知防止が落ちていないことの回帰検査）
 export const REJECT_CASES = [
-  { name: '非表示 fallback textarea 自体', html: CURRENT, find: 'textarea[name="prompt-textarea"]', expect: false },
+  { name: '非表示 fallback textarea 自体', html: LEGACY, find: 'textarea[name="prompt-textarea"]', expect: false },
   { name: 'ARIA が揃っていても composer と無関係な contenteditable', html: GENERIC, find: 'div.editor', expect: false },
   { name: 'ARIA なし・composer と無関係な contenteditable', html: GENERIC_NO_ARIA, find: 'div.editor', expect: false },
   {
     name: 'composer と同じページに同居する本文側編集域（fallback を拾わない）',
     html: COMPOSER_AND_COMMENT,
+    find: 'div.comment-box > div[contenteditable="true"]',
+    expect: false,
+  },
+  {
+    name: '旧 composer と同じページの一般編集域も拒否',
+    html: LEGACY_COMPOSER_AND_COMMENT,
     find: 'div.comment-box > div[contenteditable="true"]',
     expect: false,
   },
@@ -401,24 +426,131 @@ for (const c of ACCEPT_CASES) {
   );
 
   // 5) 選択文字列からも探れる（README の GUI 確認手順）
-  const bySelector = w.__chatgptEnterKeyProbe('#prompt-textarea');
+  const bySelector = w.__chatgptEnterKeyProbe('form[data-chatgpt-composer] [contenteditable="true"]');
   check(
-    "window.__chatgptEnterKeyProbe('#prompt-textarea') が受理を返す",
-    bySelector.accepted === true && bySelector.evidence.promptId === true,
-    JSON.stringify(bySelector.evidence)
+    '現行 DOM の自己診断は ID・fallback 不在でも composer と送信ボタンを捕捉する',
+    bySelector.accepted === true && bySelector.evidence.promptId === false &&
+      bySelector.evidence.promptFallbackNearby === false &&
+      bySelector.evidence.inComposerContainer === true &&
+      report.composerElement === doc.querySelector('[data-chatgpt-composer] [contenteditable="true"]') &&
+      report.sendButton.via === 'selector' && report.sendButton.selector === 'button[aria-label="送信"]',
+    JSON.stringify({ evidence: bySelector.evidence, sendButton: report.sendButton })
   );
 }
 
 // 6) 判定処理自体がログを出さないこと（ログレベル off で無出力のはず）
 {
   const before = logs.length;
-  const wrap = mountFixture(doc, CURRENT);
+  const wrap = mountFixture(doc, LEGACY);
   w.__chatgptEnterKeyProbe(wrap.querySelector('#prompt-textarea'));
   w.__chatgptEnterKeyProbe(wrap.querySelector('textarea[name="prompt-textarea"]'));
   check(
     '入力欄判定の呼び出しでコンソールログが増えないこと',
     logs.length === before,
     `追加ログ=${logs.length - before}`
+  );
+}
+
+// 7) 現行 DOM からのキー操作と送信ボタン探索
+function keyFixture() {
+  const fixture = loadExtension();
+  fixture.w.localStorage.setItem('chatgptEnterKeyLogLevel', 'off');
+  fixture.w.localStorage.setItem('chatgptEnterKeyVerify', '0');
+  mountFixture(fixture.doc, CURRENT + '<form><button type="submit" id="unrelated-submit">別フォーム</button></form>');
+  fixture.doc.querySelector('[data-chatgpt-composer]').addEventListener('submit', (event) => event.preventDefault());
+  return {
+    ...fixture,
+    editor: fixture.doc.querySelector('[data-chatgpt-composer] [contenteditable="true"]'),
+    send: fixture.doc.querySelector('[data-chatgpt-composer] button[aria-label="送信"]'),
+    stop: fixture.doc.querySelector('[data-chatgpt-composer] button[aria-label="停止"]'),
+    unrelated: fixture.doc.querySelector('#unrelated-submit'),
+  };
+}
+
+function dispatchEnter(fixture, options = {}) {
+  const event = new fixture.w.KeyboardEvent('keydown', {
+    key: 'Enter', bubbles: true, cancelable: true, ...options,
+  });
+  fixture.editor.dispatchEvent(event);
+  return event;
+}
+
+for (const modifier of ['ctrlKey', 'metaKey']) {
+  const f = keyFixture();
+  const clicks = { send: 0, stop: 0, unrelated: 0 };
+  for (const name of Object.keys(clicks)) f[name].addEventListener('click', () => { clicks[name] += 1; });
+  const event = dispatchEnter(f, { [modifier]: true });
+  const stats = f.w.__chatgptEnterKeyStats();
+  check(
+    `${modifier === 'ctrlKey' ? 'Ctrl' : 'Cmd'}+Enter は現行 DOM の送信ボタンだけをクリック`,
+    event.defaultPrevented && stats.send === 1 && clicks.send === 1 &&
+      clicks.stop === 0 && clicks.unrelated === 0,
+    JSON.stringify({ stats, clicks })
+  );
+}
+
+{
+  const f = keyFixture();
+  f.send.disabled = true;
+  let stopClicks = 0;
+  let unrelatedClicks = 0;
+  f.stop.addEventListener('click', () => { stopClicks += 1; });
+  f.unrelated.addEventListener('click', () => { unrelatedClicks += 1; });
+  const event = dispatchEnter(f, { ctrlKey: true });
+  const stats = f.w.__chatgptEnterKeyStats();
+  check(
+    '送信ボタンが無効なら Stop や別フォームの submit をクリックしない',
+    !event.defaultPrevented && stats.send === 0 && stopClicks === 0 && unrelatedClicks === 0,
+    JSON.stringify({ stats, stopClicks, unrelatedClicks })
+  );
+}
+
+{
+  const f = keyFixture();
+  let seenShift = null;
+  f.editor.addEventListener('keydown', (event) => { seenShift = event.shiftKey; });
+  const event = dispatchEnter(f);
+  const stats = f.w.__chatgptEnterKeyStats();
+  check(
+    'Enter 単独は現行 DOM で Shift+Enter に変換して委任',
+    !event.defaultPrevented && seenShift === true && stats.enterNewline === 1 && stats.send === 0,
+    JSON.stringify({ seenShift, stats })
+  );
+}
+
+{
+  const f = keyFixture();
+  const event = dispatchEnter(f, { shiftKey: true });
+  const stats = f.w.__chatgptEnterKeyStats();
+  check(
+    'Shift+Enter は素通し',
+    !event.defaultPrevented && event.shiftKey === true &&
+      stats.shiftPassthrough === 1 && stats.enterNewline === 0 && stats.send === 0,
+    JSON.stringify(stats)
+  );
+}
+
+{
+  const f = keyFixture();
+  const event = dispatchEnter(f, { isComposing: true });
+  const stats = f.w.__chatgptEnterKeyStats();
+  check(
+    'IME 変換中の Enter は素通し',
+    !event.defaultPrevented && !event.shiftKey && stats.imeSkip === 1 &&
+      stats.enterNewline === 0 && stats.send === 0,
+    JSON.stringify(stats)
+  );
+}
+
+{
+  const f = keyFixture();
+  f.editor.dispatchEvent(new f.w.CompositionEvent('compositionstart', { bubbles: true }));
+  const event = dispatchEnter(f, { ctrlKey: true });
+  const stats = f.w.__chatgptEnterKeyStats();
+  check(
+    'compositionstart 中の Ctrl+Enter は送信しない',
+    !event.defaultPrevented && stats.imeSkip === 1 && stats.send === 0,
+    JSON.stringify(stats)
   );
 }
 

@@ -2,7 +2,7 @@ ChatGPTの実際のDOM構造を確認するため、
 docs/chatgpt-dom-sample.txt
 を追加した。
 
-このファイルは2026-09-13時点のChatGPT Web UIから取得した参考資料である。
+このファイルは2026-09-13時点の旧DOMサンプルに、現行composer構造を追記した参考資料である。
 
 実装時にはこのDOMを解析し、ChatGPTのメッセージ入力欄を識別する方法を決定すること。
 
@@ -16,11 +16,22 @@ docs/chatgpt-dom-sample.txt
 - ChatGPT以外の入力欄や検索欄には作用しないよう対象判定を行う
 - DOMサンプルは参考情報であり、このDOM構造への完全一致を前提にしない
 
-初期状態の画面におけるテキスト入力欄
+現行DOMのcomposerと入力欄（ユーザー提供の構造に基づく抜粋）
+
+<form class="relative flex flex-col gap-2" data-composer-placement="home" data-chatgpt-composer="" data-thread-find-composer="true">
+  ...
+  <div contenteditable="true" aria-multiline="true" role="textbox" class="ProseMirror" data-composer-markdown="" aria-label="ChatGPT に聞く" data-virtualkeyboard="true">...</div>
+  <button type="submit" aria-label="送信">...</button>
+</form>
+
+この構造には id="prompt-textarea"、旧composerコンテナ、name="prompt-textarea" のfallbackがない。
+判定は form の data-chatgpt-composer と入力欄の contenteditable に基づき、class と aria-label は必須にしない。
+
+旧DOM: 初期状態の画面におけるテキスト入力欄
 
 <div class="wcDTda_prosemirror-parent text-token-text-primary max-h-[max(30svh,5rem)] max-h-52 min-h-[var(--deep-research-composer-extra-height,unset)] flex-1 scroll-py-4 overflow-auto [scrollbar-width:thin] firefox vertical-scroll-fade-mask group-data-[expanded-composer-mode-button]/composer:pe-9"><textarea dir="auto" class="wcDTda_fallbackTextarea" name="prompt-textarea" autocomplete="off" inputmode="text" autocorrect="on" autocapitalize="sentences" spellcheck="true" placeholder="ChatGPT に質問" aria-label="ChatGPT とチャットする" data-virtualkeyboard="true" style="display: none;"></textarea><script nonce="">(function que(e,t){e?.addEventListener(`input`,()=>{performance.mark(t)},{once:!0})})(document.currentScript?.parentElement,"composer.first-prompt-input");window.__oai_logHTML?window.__oai_logHTML():window.__oai_SSR_HTML=window.__oai_SSR_HTML||Date.now();requestAnimationFrame((function(){window.__oai_logTTI?window.__oai_logTTI():window.__oai_SSR_TTI=window.__oai_SSR_TTI||Date.now()}))</script><div contenteditable="true" autocomplete="off" inputmode="text" autocorrect="on" autocapitalize="sentences" spellcheck="true" translate="no" class="ProseMirror" id="prompt-textarea" data-virtualkeyboard="true" role="textbox" aria-multiline="true" aria-label="ChatGPT とチャットする"><p dir="auto" data-empty-paragraph="true" data-placeholder="ChatGPT に質問" class="placeholder"><br class="ProseMirror-trailingBreak"></p></div></div>
 
 
-既に開始済みの会話スレッド内のテキスト入力欄
+旧DOM: 既に開始済みの会話スレッド内のテキスト入力欄
 
 <div class="wcDTda_prosemirror-parent text-token-text-primary max-h-[max(30svh,5rem)] max-h-52 min-h-[var(--deep-research-composer-extra-height,unset)] flex-1 scroll-py-4 overflow-auto [scrollbar-width:thin] default-browser vertical-scroll-fade-mask group-data-[expanded-composer-mode-button]/composer:pe-9"><textarea dir="auto" class="wcDTda_fallbackTextarea" name="prompt-textarea" autocomplete="off" inputmode="text" autocorrect="on" autocapitalize="sentences" spellcheck="true" placeholder="ChatGPT に質問" aria-label="ChatGPT とチャットする" data-virtualkeyboard="true" style="display: none;"></textarea><script nonce="">(function que(e,t){e?.addEventListener(`input`,()=>{performance.mark(t)},{once:!0})})(document.currentScript?.parentElement,"composer.first-prompt-input");window.__oai_logHTML?window.__oai_logHTML():window.__oai_SSR_HTML=window.__oai_SSR_HTML||Date.now();requestAnimationFrame((function(){window.__oai_logTTI?window.__oai_logTTI():window.__oai_SSR_TTI=window.__oai_SSR_TTI||Date.now()}))</script><div contenteditable="true" autocomplete="off" inputmode="text" autocorrect="on" autocapitalize="sentences" spellcheck="true" translate="no" class="ProseMirror" aria-label="ChatGPT とチャットする" id="prompt-textarea" data-virtualkeyboard="true" role="textbox" aria-multiline="true"><p dir="auto" data-empty-paragraph="true" data-placeholder="ChatGPT に質問" class="placeholder"><br class="ProseMirror-trailingBreak"></p></div></div>
