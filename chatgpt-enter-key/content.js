@@ -785,14 +785,16 @@
 
       if (suppressedSendEnter) {
         const elapsed = event.timeStamp - suppressedSendEnter.at;
-        if (elapsed >= 0 && elapsed < 2000 && isComposerInput(editable)) {
+        if (elapsed >= 0 && elapsed < 2000) {
+          // send click() 直後に composer DOM / focus が差し替わっても、
+          // 同じ物理キー操作の後続イベントを ChatGPT 側へ渡さない。
           event.preventDefault();
           event.stopImmediatePropagation();
           stats.sendFollowupStopped += 1;
           logDebug('Ctrl/Cmd+Enter keypress: keydown と対のため停止');
           return;
         }
-        if (!(elapsed >= 0 && elapsed < 2000)) suppressedSendEnter = null;
+        suppressedSendEnter = null;
       }
 
       if (remappedPlainEnter) {
@@ -823,9 +825,11 @@
 
       if (suppressedSendEnter) {
         const elapsed = event.timeStamp - suppressedSendEnter.at;
-        const matched = elapsed >= 0 && elapsed < 2000 && isComposerInput(editable);
+        const matched = elapsed >= 0 && elapsed < 2000;
         suppressedSendEnter = null;
         if (matched) {
+          // keydown で拡張機能が送信を確定済みなので、DOM 差し替え後でも
+          // 対応する Enter keyup は無条件に遮断する。
           event.preventDefault();
           event.stopImmediatePropagation();
           stats.sendFollowupStopped += 1;
