@@ -503,6 +503,28 @@ for (const modifier of ['ctrlKey', 'metaKey']) {
 
 {
   const f = keyFixture();
+  let pageKeyup = 0;
+  f.w.addEventListener('keyup', () => { pageKeyup += 1; });
+
+  const event = dispatchEnter(f, { ctrlKey: true });
+  f.editor.remove();
+
+  const keyup = new f.w.KeyboardEvent('keyup', {
+    key: 'Enter', bubbles: true, cancelable: true, ctrlKey: true,
+  });
+  f.doc.body.dispatchEvent(keyup);
+
+  const stats = f.w.__chatgptEnterKeyStats();
+  check(
+    'Ctrl+Enter 送信直後に composer DOM が差し替わっても対応する keyup を遮断',
+    event.defaultPrevented && keyup.defaultPrevented &&
+      stats.send === 1 && stats.sendFollowupStopped === 1 && pageKeyup === 0,
+    JSON.stringify({ stats, pageKeyup })
+  );
+}
+
+{
+  const f = keyFixture();
   f.send.disabled = true;
   let stopClicks = 0;
   let unrelatedClicks = 0;
