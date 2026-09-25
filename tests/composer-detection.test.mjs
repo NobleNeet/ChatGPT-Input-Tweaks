@@ -467,25 +467,37 @@ function keyFixture() {
   };
 }
 
-function dispatchEnter(fixture, options = {}) {
-  const event = new fixture.w.KeyboardEvent('keydown', {
+function dispatchEnterEvent(fixture, type, options = {}) {
+  const event = new fixture.w.KeyboardEvent(type, {
     key: 'Enter', bubbles: true, cancelable: true, ...options,
   });
   fixture.editor.dispatchEvent(event);
   return event;
 }
 
+function dispatchEnter(fixture, options = {}) {
+  return dispatchEnterEvent(fixture, 'keydown', options);
+}
+
 for (const modifier of ['ctrlKey', 'metaKey']) {
   const f = keyFixture();
   const clicks = { send: 0, stop: 0, unrelated: 0 };
   for (const name of Object.keys(clicks)) f[name].addEventListener('click', () => { clicks[name] += 1; });
+
+  let pageFollowups = 0;
+  f.w.addEventListener('keypress', () => { pageFollowups += 1; });
+  f.w.addEventListener('keyup', () => { pageFollowups += 1; });
+
   const event = dispatchEnter(f, { [modifier]: true });
+  const keypress = dispatchEnterEvent(f, 'keypress', { [modifier]: true });
+  const keyup = dispatchEnterEvent(f, 'keyup', { [modifier]: true });
   const stats = f.w.__chatgptEnterKeyStats();
   check(
-    `${modifier === 'ctrlKey' ? 'Ctrl' : 'Cmd'}+Enter は現行 DOM の送信ボタンだけをクリック`,
-    event.defaultPrevented && stats.send === 1 && clicks.send === 1 &&
-      clicks.stop === 0 && clicks.unrelated === 0,
-    JSON.stringify({ stats, clicks })
+    `${modifier === 'ctrlKey' ? 'Ctrl' : 'Cmd'}+Enter は送信だけ行い、対応する keypress / keyup を ChatGPT 側へ流さない`,
+    event.defaultPrevented && keypress.defaultPrevented && keyup.defaultPrevented &&
+      stats.send === 1 && stats.sendFollowupStopped === 2 && clicks.send === 1 &&
+      clicks.stop === 0 && clicks.unrelated === 0 && pageFollowups === 0,
+    JSON.stringify({ stats, clicks, pageFollowups })
   );
 }
 
