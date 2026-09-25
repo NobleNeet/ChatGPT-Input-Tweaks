@@ -183,6 +183,7 @@
     noSendButton: 0,
     guarded: 0,
     keyUpStopped: 0, // remap失敗時にkeyupを停止した回数
+    sendFollowupStopped: 0, // Ctrl/Cmd+Enter 送信後の keypress / keyup を停止した回数
   };
   const recentMisses = []; // 直近の「特定できなかった Enter」の時刻
   let warnedDetection = false;
@@ -531,6 +532,7 @@
   let lastSendAt = -Infinity;
   let remappedPlainEnter = null; // { at } keypress / keyupにもShift状態を引き継ぐ
   let suppressedPlainEnter = null; // remap失敗時にkeypress / keyupを安全側で断つ
+  let suppressedSendEnter = null; // Ctrl/Cmd+Enter 送信後の keypress / keyup を安全側で断つ
 
   // 戻り値: 'sent'（click 済み）| 'guarded'（連打抑止で何もしない）
   function sendWith(button, event) {
@@ -543,6 +545,9 @@
     else event.stopPropagation();
 
     // 連打・キーリピート時もイベントは止め、ChatGPT 側の処理による二重送信を防ぐ。
+    // ChatGPT 側が keyup 等で Ctrl/Cmd+Enter の別ショートカットを解釈する場合に備え、
+    // この送信操作に対応する後続 Enter イベントも短時間だけ追跡して遮断する。
+    suppressedSendEnter = { at: now };
     if (now - lastSendAt < SEND_GUARD_MS) return 'guarded';
     lastSendAt = now;
 
@@ -778,6 +783,18 @@
       if (event.key !== 'Enter') return;
       const editable = findEditableAncestor(event.target);
 
+      if (suppressedSendEnter) {
+        const elapsed = event.timeStamp - suppressedSendEnter.at;
+        if (elapsed >= 0 && elapsed < 2000 && isComposerInput(editable)) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          stats.sendFollowupStopped += 1;
+          logDebug('Ctrl/Cmd+Enter keypress: keydown と対のため停止');
+          return;
+        }
+        if (!(elapsed >= 0 && elapsed < 2000)) suppressedSendEnter = null;
+      }
+
       if (remappedPlainEnter) {
         const elapsed = event.timeStamp - remappedPlainEnter.at;
         if (elapsed >= 0 && elapsed < 30000 && isComposerInput(editable)) {
@@ -803,6 +820,19 @@
     (event) => {
       if (event.key !== 'Enter') return;
       const editable = findEditableAncestor(event.target);
+
+      if (suppressedSendEnter) {
+        const elapsed = event.timeStamp - suppressedSendEnter.at;
+        const matched = elapsed >= 0 && elapsed < 2000 && isComposerInput(editable);
+        suppressedSendEnter = null;
+        if (matched) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          stats.sendFollowupStopped += 1;
+          logDebug('Ctrl/Cmd+Enter keyup: keydown と対のため停止');
+          return;
+        }
+      }
 
       if (remappedPlainEnter) {
         const elapsed = event.timeStamp - remappedPlainEnter.at;
