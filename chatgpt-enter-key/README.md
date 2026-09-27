@@ -1,6 +1,6 @@
 # ChatGPT Enter Key（Vivaldi / Chrome 互換拡張・Manifest V3）
 
-ChatGPT の入力欄での Enter キー挙動だけを変える、最小構成の拡張機能です。
+ChatGPT の Chat モードと Work モードの入力欄で Enter キー挙動を変える拡張機能です。
 
 | 操作 | 挙動 |
 | --- | --- |
@@ -48,7 +48,7 @@ tests/
     判定は「編集可能か」＋「ChatGPT composer 固有の強い根拠」に分離している。
     - 編集可能: `isContentEditable`（`contenteditable`）
     - 強い根拠（いずれか 1 つ）: `id="prompt-textarea"` ／ composer コンテナ
-      （現行の `[data-chatgpt-composer]`、または旧DOMの `#composer`・`[data-testid="composer"]`・`[data-test-id="composer"]`・`.composer-sender`）内部
+      （Chat モードの `[data-chatgpt-composer]`、Work モードの `form[data-thread-find-composer="true"][data-composer-placement]`、または旧DOMの `#composer`・`[data-testid="composer"]`・`[data-test-id="composer"]`・`.composer-sender`）内部
       ／ 同一または近傍（実入力欄から上 2 階層・その容器から下 2 階層まで）の
       `name="prompt-textarea"` fallback
     - `role="textbox"` と `aria-multiline="true"` は**必須条件ではない**（補助シグナル）。
@@ -79,6 +79,7 @@ ARIA 属性（`role="textbox"` / `aria-multiline="true"`）は補助シグナル
 | DOM | 受理 | 理由 |
 | --- | --- | --- |
 | `<form data-chatgpt-composer><div contenteditable="true"></div></form>` | ○ | 現行構造。composer コンテナが強い根拠。ID・fallback・class・aria-label は不要 |
+| `<form data-thread-find-composer="true" data-composer-placement="home"><div contenteditable="true"></div></form>` | ○ | Work モード。フォームが強い根拠。Chat モードの条件も継続して受理する |
 | `<div id="prompt-textarea" contenteditable="true" role="textbox" aria-multiline="true">` | ○ | 旧構造。ID＋ARIA |
 | `<div id="prompt-textarea" contenteditable="true">` | ○ | ARIA 属性が消えても ID が強い根拠 |
 | `<div contenteditable="true" role="textbox" aria-multiline="true">`（composer コンテナ内部、または近傍に `name="prompt-textarea"` fallback） | ○ | 強い根拠がコンテナ／fallback |
@@ -230,7 +231,7 @@ getEventListeners(document.querySelector('form[data-chatgpt-composer] [contented
 
 ## 5. 既知の弱点
 
-- **DOM 依存**: 現行の `[data-chatgpt-composer]` と旧DOM用の `#prompt-textarea`・`#composer`、送信ボタンの候補属性が改版で変わると検出に失敗しうる。その場合 `Ctrl+Enter` は素通しされ、`Enter` の改行化も効かないことがある。
+- **DOM 依存**: `[data-chatgpt-composer]`、新しい `form[data-thread-find-composer="true"][data-composer-placement]` と旧DOM用の `#prompt-textarea`・`#composer`、送信ボタンの候補属性が改版で変わると検出に失敗しうる。その場合 `Ctrl+Enter` は素通しされ、`Enter` の改行化も効かないことがある。
   入力欄判定は `role="textbox"` / `aria-multiline="true"` に依存していないが、
   強い根拠 3 系統（`id="prompt-textarea"`／composer コンテナ／近傍の `name="prompt-textarea"` fallback）が
   同時に消えると検出できない。その場合は自己診断の `composerEvidence` が全て `false` になる。

@@ -45,9 +45,10 @@
   // 改行を持ち得る編集域の種別（input[type=search] 等は後続の除外条件で弾く）
   const TEXT_INPUT_TYPES = new Set(['text']);
 
-  // composer 全体を指し得るコンテナ候補（バージョン差分対策）
+  // Chat / Work 両モードの composer と旧構造のコンテナ候補。
   const COMPOSER_CONTAINER_SELECTOR = [
     '[data-chatgpt-composer]',
+    'form[data-thread-find-composer="true"][data-composer-placement]', // Work モード
     '#composer',
     '[data-testid="composer"]',
     '[data-test-id="composer"]',
@@ -387,7 +388,7 @@
   function hasStrongComposerIdentity(el) {
     // 旧 DOM の ID。role / aria-multiline が消えても効く。
     if (el.id === 'prompt-textarea') return true;
-    // 現行の data-chatgpt-composer または旧 semantic composer container の内部。
+    // composer 専用フォームまたは旧 semantic composer container の内部。
     if (isInsideComposer(el)) return true;
     // 同一または近傍コンテナに prompt fallback がある（旧 DOM の構成）。
     if (hasPromptFallbackNearby(el)) return true;

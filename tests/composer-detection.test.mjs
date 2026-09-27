@@ -104,14 +104,24 @@ function loadExtension() {
 
 // ---- 固定句（現行 DOM サンプルと、改版で変わりそうな DOM） ----------------
 
-// 現行構造: ID・旧コンテナ・fallback はない。class と aria-label は判定根拠にしない。
+// Chat モード: ID・fallback はない。class と aria-label は判定根拠にしない。
 const CURRENT = `
   <form class="relative flex flex-col gap-2" data-composer-placement="home"
-        data-chatgpt-composer="" data-thread-find-composer="true">
+        data-chatgpt-composer="">
     <div contenteditable="true" aria-multiline="true" role="textbox"
          class="ProseMirror" data-composer-markdown="" aria-label="ChatGPT に聞く"
          data-virtualkeyboard="true"><p><br></p></div>
     <button type="button" aria-label="停止"></button>
+    <button type="submit" aria-label="送信">送信</button>
+  </form>`;
+
+// Work モード: 添付 DOM の識別属性と入力欄の階層を再現。送信ボタンはキー操作検査用。
+const WORK = `
+  <form data-composer-placement="home" data-thread-find-composer="true">
+    <div data-composer-body><div data-composer-input-layout="multiline">
+      <div contenteditable="true" role="textbox" aria-multiline="true"
+           class="ProseMirror" data-composer-markdown=""><p><br></p></div>
+    </div></div>
     <button type="submit" aria-label="送信">送信</button>
   </form>`;
 
@@ -193,6 +203,11 @@ function withoutAria(html) {
 
 // 受理されるべきケース
 export const ACCEPT_CASES = [
+  {
+    name: '新構造: data-thread-find-composer のフォーム内の ProseMirror',
+    html: WORK,
+    find: '[data-composer-markdown]', expect: true,
+  },
   { name: '現行構造: data-chatgpt-composer 内の contenteditable（ID・fallback なし）', html: CURRENT, find: 'div[contenteditable="true"]', expect: true },
   { name: '旧構造: #prompt-textarea + contenteditable + ARIA', html: LEGACY, find: '#prompt-textarea', expect: true },
   { name: '現行コンテナ内は class・aria-label なしでも受理', html: '<form data-chatgpt-composer><div contenteditable="true"></div></form>', find: 'div[contenteditable="true"]', expect: true },
@@ -240,6 +255,7 @@ export const ACCEPT_CASES = [
 
 // 拒否されるべきケース（誤検知防止が落ちていないことの回帰検査）
 export const REJECT_CASES = [
+  { name: 'thread-find のみの一般フォームは拒否', html: '<form data-thread-find-composer="true"><div contenteditable="true"></div></form>', find: '[contenteditable]', expect: false },
   { name: '非表示 fallback textarea 自体', html: LEGACY, find: 'textarea[name="prompt-textarea"]', expect: false },
   { name: 'ARIA が揃っていても composer と無関係な contenteditable', html: GENERIC, find: 'div.editor', expect: false },
   { name: 'ARIA なし・composer と無関係な contenteditable', html: GENERIC_NO_ARIA, find: 'div.editor', expect: false },
@@ -501,6 +517,29 @@ for (const modifier of ['ctrlKey', 'metaKey']) {
   );
 }
 
+// Work の識別属性だけで検出し、Chat と同じ Enter / Ctrl+Enter 処理に進む。
+{
+  const f = loadExtension();
+  f.w.localStorage.setItem('chatgptEnterKeyLogLevel', 'off');
+  f.w.localStorage.setItem('chatgptEnterKeyVerify', '0');
+  mountFixture(f.doc, WORK);
+  const form = f.doc.querySelector('form[data-thread-find-composer]');
+  const editor = form.querySelector('[contenteditable="true"]');
+  const send = form.querySelector('button[aria-label="送信"]');
+  let clicks = 0;
+  send.addEventListener('click', () => { clicks += 1; });
+  form.addEventListener('submit', (event) => event.preventDefault());
+  const enter = new f.w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+  editor.dispatchEvent(enter);
+  const ctrl = new f.w.KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true });
+  editor.dispatchEvent(ctrl);
+  const stats = f.w.__chatgptEnterKeyStats();
+  check('Work モードでも Enter は改行、Ctrl+Enter は送信',
+    !enter.defaultPrevented && ctrl.defaultPrevented && clicks === 1 &&
+      stats.enterNewline === 1 && stats.send === 1,
+    JSON.stringify({ stats, clicks }));
+}
+
 {
   const f = keyFixture();
   let pageKeyup = 0;
@@ -600,6 +639,4 @@ console.log(`\n${results.length - failed}/${results.length} 件成功`);
 
 // 拡張の自己診断ループ（requestAnimationFrame）が生きているので明示的に終了する
 process.exit(failed === 0 ? 0 : 1);
-
-
 
