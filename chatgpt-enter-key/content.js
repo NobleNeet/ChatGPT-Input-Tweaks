@@ -122,7 +122,7 @@
   //     localStorage.setItem('chatgptEnterKeyLogLevel', 'off')     // 無音
   //   自己診断（セレクタが生きているか等）:
   //     document.dispatchEvent(new CustomEvent('chatgptEnterKeySelfTest'))
-  const VERSION = '0.9.1';
+  const VERSION = '0.9.2';
   const LOG_TAG = '[ChatGPT Enter Key]';
   const LOG_STORAGE_KEY = 'chatgptEnterKeyLogLevel';
   const SELF_TEST_EVENT = 'chatgptEnterKeySelfTest';
@@ -185,6 +185,7 @@
     guarded: 0,
     keyUpStopped: 0, // remap失敗時にkeyupを停止した回数
     sendFollowupStopped: 0, // Ctrl/Cmd+Enter 送信後の keypress / keyup を停止した回数
+    sendCleared: 0, // 送信後に消えなかった composer をこちらで空にした回数
   };
   const recentMisses = []; // 直近の「特定できなかった Enter」の時刻
   let warnedDetection = false;
@@ -209,6 +210,9 @@
   const STRATEGY_STORAGE_KEY = 'chatgptEnterKeyStrategy';
   const VERIFY_STORAGE_KEY = 'chatgptEnterKeyVerify';
   const VERIFY_NEWLINE_MS = 60; // 既定動作で改行が反映されたか見る待ち時間
+  // click() 送信後に ChatGPT 自身の composer クリアを待つ時間 [ms]
+  const CLEAR_AFTER_SEND_STORAGE_KEY = 'chatgptEnterKeyClearAfterSend';
+  const CLEAR_AFTER_SEND_MS = 500;
 
   function readStored(key, windowKey) {
     if (typeof window[windowKey] === 'string') return window[windowKey];
@@ -535,9 +539,54 @@
   let suppressedPlainEnter = null; // remap失敗時にkeypress / keyupを安全側で断つ
   let suppressedSendEnter = null; // Ctrl/Cmd+Enter 送信後の keypress / keyup を安全側で断つ
 
+  function composerText(el) {
+    if (!el) return '';
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'textarea' || tag === 'input') return String(el.value || '').trim();
+    return String(el.textContent || '').trim();
+  }
+
+  // Ctrl+Enter 送信は button.click()（非可信クリック）で行うため、ChatGPT 側の
+  // 「Enter キー送信時に消える下書き」が消化されず、composer に送信文本が
+  // 残ることがある。その残り物が Ctrl+Shift+O の新規チャットで復元されて
+  // しまうため、click() 後も送信内容がそのまま残っている場合だけこちらで
+  // 空にする（ユーザーが別の入力を始めた場合は触らない）。
+  // 無効化: localStorage.setItem('chatgptEnterKeyClearAfterSend', '0')
+  function scheduleComposerClear(editable, sentText) {
+    if (!editable || !sentText) return;
+    if (
+      readStored(CLEAR_AFTER_SEND_STORAGE_KEY, '__chatgptEnterKeyClearAfterSend') === '0'
+    ) {
+      return;
+    }
+    window.setTimeout(() => {
+      try {
+        if (editable.isConnected === false) return; // SPA で作り直されていたら何もしない
+        const after = composerText(editable);
+        if (after === '') return; // ChatGPT 側がクリア済み
+        if (after !== sentText) {
+          logDebug('送信後の composer が送信内容と異なるため後始末は見送り');
+          return;
+        }
+        if (editable.tagName.toLowerCase() === 'textarea' || editable.tagName.toLowerCase() === 'input') {
+          editable.value = '';
+        } else {
+          editable.innerHTML = '';
+        }
+        // ページ側エディタ（ProseMirror 等）の更新フローに乗せて下書きも空にする
+        editable.dispatchEvent(new Event('input', { bubbles: true }));
+        stats.sendCleared += 1;
+        logInfo('Ctrl+Enter 送信: composer が空にならなかったためこちらで空にしました');
+      } catch (_) {
+        logWarn('Ctrl+Enter 送信: composer の後始末に失敗しました');
+      }
+    }, CLEAR_AFTER_SEND_MS);
+  }
+
   // 戻り値: 'sent'（click 済み）| 'guarded'（連打抑止で何もしない）
-  function sendWith(button, event) {
+  function sendWith(button, event, editable) {
     const now = typeof event.timeStamp === 'number' ? event.timeStamp : Date.now();
+    const sentText = composerText(editable);
     // ChatGPT 側に Enter を渡さず、既定の改行挿入も止めてから click() する。
     // 同一ノード同一フェーズの後続リスナー（ページ側の window ハンドラ等）も
     // 断つ必要があるため stopImmediatePropagation() を使う。
@@ -553,6 +602,7 @@
     lastSendAt = now;
 
     button.click();
+    scheduleComposerClear(editable, sentText);
     return 'sent';
   }
 
@@ -681,7 +731,7 @@
         );
       }
 
-      if (sendWith(found.button, event) === 'guarded') {
+      if (sendWith(found.button, event, editable) === 'guarded') {
         stats.guarded += 1;
         logDebug('Ctrl+Enter: ' + SEND_GUARD_MS + 'ms 未満のため二重送信を抑止');
         return;

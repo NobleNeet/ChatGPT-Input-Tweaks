@@ -42,6 +42,13 @@ tests/
   送信ボタン（`data-testid="compose-send-button"` など候補 + `aria-label` 名称一致のフォールバック）を
   探して有効なら `click()`。ボタンが見つからない場合はイベントを素通しする。
   400ms 未満の連続発火は無視して二重送信を防ぐ。
+- **送信後の composer 後始末**: `button.click()` は非可信クリックなので、ChatGPT 側の
+  「Enter キー送信時に消える下書き」が消化されず composer に送信文本が残ることがあり、
+  それが `Ctrl+Shift+O` の新規チャットに復元されてしまう。そこで `click()` から 500ms 後に
+  composer を再チェックし、**送信内容与そのまま残っている場合のみ**こちらで空にして
+  `input` イベントを発火させ、ページ側エディタ（ProseMirror 等）の更新フローで下書きも更新させる。
+  ChatGPT 側が先に消していたり、ユーザーが別の入力を始めた後は触らない。
+  無効化: `localStorage.setItem('chatgptEnterKeyClearAfterSend', '0')`。
 - **入力欄の判定（イベント委譲）**: 要素参照は一切保持せず、毎回 `event.target`
   （またはその祖先）が ChatGPT の入力欄かを判定する。SPA で DOM が再生成されても成立する。
   - 実入力欄は `textarea` ではなく ProseMirror の `contenteditable="true"` div。
@@ -108,6 +115,9 @@ ARIA 属性（`role="textbox"` / `aria-multiline="true"`）は補助シグナル
 - [ ] `Enter` だけで改行になり、**送信されない**
 - [ ] `Shift+Enter` で改行（従来どおり）
 - [ ] `Ctrl+Enter` で送信される
+- [ ] `Ctrl+Enter` 送信後、送信文本が composer に残っていても約 0.5 秒後に空になる
+      （ChatGPT 側が先に消した場合は追加動作しない／残った場合は `sendCleared` が増える）
+- [ ] 送信後 0.5 秒以内に別の文章を入力し直した場合、後始末で消されない
 - [ ] `Ctrl+Enter` を連打・長押ししても**二重送信されない**
 - [ ] 入力が空のとき `Ctrl+Enter` を押しても何も起きない（送信ボタン無効のため素通し）
 - [ ] `Alt+Enter` / `AltGr+Enter` で既存動作が変わらない
@@ -125,7 +135,7 @@ ARIA 属性（`role="textbox"` / `aria-multiline="true"`）は補助シグナル
 - [ ] `Enter` 改行が ChatGPT 側の状態に反映され、送信時に改行として届く
 - [ ] `Ctrl+Z` などの Undo / Redo、ペースト後の改行が壊れない
 - [ ] ページ遷移（新規チャット・履歴選択）後もそのまま機能する
-- [ ] Console に `[ChatGPT Enter Key] v0.9.1 読み込み完了 (world=MAIN, run_at=document_start) ... Enter 方針=remapToShiftEnter` が 1 行だけ出ている（＝注入されている）
+- [ ] Console に `[ChatGPT Enter Key] v0.9.2 読み込み完了 (world=MAIN, run_at=document_start) ... Enter 方針=remapToShiftEnter` が 1 行だけ出ている（＝注入されている）
 - [ ] `window.__chatgptEnterKeyProbe('form[data-chatgpt-composer] [contenteditable="true"]')` が
       `accepted: true`、`evidence.inComposerContainer: true` を返す
       （`evidence.promptId` と `evidence.promptFallbackNearby` は false でも受理される）
@@ -192,7 +202,7 @@ DevTools の context で本拡張を選べば `__chatgptEnterKeySelfTest()`（�
 
 | 症状 | ログの征兆 | 対応 |
 | --- | --- | --- |
-| そもそも効いていない | `v0.9.1 読み込み完了` が出ていない | 拡張カードの更新後、タブを完全に閉じて開き直す／拡張が有効か／`chatgpt.com` か |
+| そもそも効いていない | `v0.9.2 読み込み完了` が出ていない | 拡張カードの更新後、タブを完全に閉じて開き直す／拡張が有効か／`chatgpt.com` か |
 | **`Enter` が送信される（ログは出ている）** | `remappedShiftKey` を確認 | `true` でなければイベント変更に失敗。誤送信防止の停止処理が働く |
 | `Enter` で改行されない | `Enter` に対するログが 1 行も無い | 入力欄を特定できていない。自己診断で `accepted: false` ばかりなら `window.__chatgptEnterKeyProbe('form[data-chatgpt-composer] [contenteditable="true"]')` の `evidence` でどの根拠が消えているか確認し、`isComposerInput` の条件を更新 |
 | 改行だけ増えない | `Enter 操作後も composer の DOM が変わっていません` | 詳細ログを有効にし、`remappedShiftKey: true` と keypress / keyup の引き継ぎを確認する |
@@ -243,6 +253,9 @@ getEventListeners(document.querySelector('form[data-chatgpt-composer] [contented
 - **候補一覧との相互作用**: 既定方針ではEnterがShift+Enterとして見えるため、スラッシュコマンドや@言及の候補一覧でEnter決定できなくなる可能性がある。
 - **改行チェックの誤検知**: 構造署名（`innerHTML.length` + `childElementCount`）で改行の反映を見るため、空段落の統合など DOM が変わらない改行では誤って warn することがある（実害はなく、`chatgptEnterKeyVerify = '0'` で止められる）。
 - **生成中の `Ctrl+Enter`**: 送信ボタンが無効になるため基本は素通しだが、`aria-label` 名称一致のフォールバックが意図しないボタンに一致する理論余地がある。
+- **送信後後始末の誤消し余地**: 送信直後 500ms 以内に、送信したものと**完全に同一の文**を
+  再入力した場合のみ、後始末で誤って消える理論余地がある（同一内容の即時再入力は稀なため許容）。
+  実害が出たら `chatgptEnterKeyClearAfterSend = '0'` で無効化できる。
 - **`Cmd+Enter`**: macOS 対策として `Ctrl+Enter` と同扱い。Linux/Windows で Superキー併用も送信になる。
 - **IME 猶予窓**: `compositionend` 後 100ms 以内の `Enter` は安全側で無視する。変換確定と送信を 0.1 秒未満で連続実行すると 1 回無視されることがある。
 - **例外範囲**: 入力欄判定の否定条件に無い UI（ダイアログ内の一部 textarea 等）で誤介入する可能性がある。逆に、厳格化しすぎると新 UI で効かなくなる。

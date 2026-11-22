@@ -627,6 +627,62 @@ for (const modifier of ['ctrlKey', 'metaKey']) {
   );
 }
 
+// 8) 送信後の composer 後始末（click() 送信で ChatGPT 側のクリアが走らないケース）
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+{
+  const f = keyFixture();
+  f.editor.textContent = 'last posted message';
+  let clearedInputs = 0;
+  f.editor.addEventListener('input', (event) => {
+    if (event.isTrusted === false) clearedInputs += 1;
+  });
+  dispatchEnter(f, { ctrlKey: true });
+  const stillFilledAfterClick = f.editor.textContent.trim() === 'last posted message';
+  await sleep(700);
+  const stats = f.w.__chatgptEnterKeyStats();
+  check(
+    '送信後に composer が残っている場合、500ms 後にこちらで空にし input を発火する',
+    stillFilledAfterClick &&
+      f.editor.textContent.trim() === '' &&
+      stats.send === 1 &&
+      stats.sendCleared === 1 &&
+      clearedInputs >= 1,
+    JSON.stringify({ stats, clearedInputs, text: f.editor.textContent })
+  );
+}
+
+{
+  const f = keyFixture();
+  f.editor.textContent = 'message one';
+  dispatchEnter(f, { ctrlKey: true });
+  await sleep(100);
+  f.editor.textContent = 're-typed by user';
+  await sleep(700);
+  const stats = f.w.__chatgptEnterKeyStats();
+  check(
+    '送信後にユーザーが別内容へ入力し直していたら後始末で見送る',
+    f.editor.textContent === 're-typed by user' && stats.sendCleared === 0,
+    JSON.stringify({ stats, text: f.editor.textContent })
+  );
+}
+
+{
+  const f = keyFixture();
+  f.w.localStorage.setItem('chatgptEnterKeyClearAfterSend', '0');
+  f.editor.textContent = 'keep me';
+  dispatchEnter(f, { ctrlKey: true });
+  await sleep(700);
+  const stats = f.w.__chatgptEnterKeyStats();
+  check(
+    'chatgptEnterKeyClearAfterSend=0 では送信後後始末を無効化する',
+    f.editor.textContent.trim() === 'keep me' && stats.sendCleared === 0,
+    JSON.stringify({ stats, text: f.editor.textContent })
+  );
+}
+
 // ---- 結果 ----------------------------------------------------------------
 
 let failed = 0;
