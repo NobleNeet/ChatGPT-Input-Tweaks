@@ -31,7 +31,7 @@
 
   // ---- 定数 --------------------------------------------------------------
 
-  const NAV_VERSION = '0.10.10';
+  const NAV_VERSION = '0.10.11';
   const LOG_TAG = '[ChatGPT Nav]';
   const LOG_STORAGE_KEY = 'chatgptNavLogLevel';
 
@@ -1505,7 +1505,21 @@
   function onShortcutKeydown(e) {
     const dir = shortcutDir(e);
     if (!dir) return;
-    e.preventDefault(); // Windows の Alt メニュー発火などを抑止
+    if (e.cancelable !== false) e.preventDefault(); // Windows の Alt メニュー発火などを抑止
+    // この keydown はページ側へ一切渡さない。ChatGPT や他拡張が Alt+矢印などに
+    // グローバルハンドラを持っていた場合、我々のジャンプと取り合って
+    // 最下部（最新回答）へ引き戻す可能性があるため。
+    if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+    else e.stopPropagation();
+    // ホールドによるキーオートリピート（約30発/秒）は丸ごと無視。
+    // 連鎖歩行を許すと目標の上書きが秒あたり数十回走り、下方向では
+    // キャッシュ末尾＝最新回答まで突き抜けて「1つ下」が制御不能になる
+    // （実測の「どの位置からでも最新へ」の元凶）。
+    // 物理的な 1 プッシュ = 1 ホップ。連打での步行は従来通り。
+    if (e.repeat) {
+      dbg('shortcut ignore (autorepeat)', dir);
+      return;
+    }
     const key = neighborKey(dir);
     if (!key) {
       dbg('shortcut no-op', dir, `items=${items.length}`, `active=${activeKey}`);

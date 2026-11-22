@@ -1511,6 +1511,25 @@ function pressAlt(f, key, mods = {}) {
   pressAlt(f, 'j'); // Alt 無しはショートカットでも中断キーでもない
   check('j 単体（Alt無し）はジャンプを変えない', f.nav.jumpState() && f.nav.jumpState().key === (stAlt && stAlt.key), JSON.stringify(f.nav.jumpState()));
 
+  // ホールド時のオートリピートは丸ごと無視：ホップも増やさず、進行中ジャンプも消さない
+  const stRepeatBase = f.nav.jumpState();
+  pressAlt(f, 'ArrowDown', { altKey: true, repeat: true });
+  pressAlt(f, 'ArrowDown', { altKey: true, repeat: true });
+  check('オートリピート（押下長押し）は無視（先頭不変・中断せず）',
+    f.nav.jumpState() && stRepeatBase && f.nav.jumpState().key === stRepeatBase.key,
+    JSON.stringify(f.nav.jumpState()));
+
+  // Alt コンボの keydown はページ側へ渡らない（stopImmediatePropagation）
+  let pageSaw = 0;
+  const probe = () => { pageSaw += 1; };
+  f.w.addEventListener('keydown', probe, true);
+  pressAlt(f, 'ArrowDown', { altKey: true });
+  pressAlt(f, 'j', { altKey: true });
+  check('Alt コンボはページ側ハンドラに届かない', pageSaw === 0, String(pageSaw));
+  pressAlt(f, 'x');
+  check('非ショートカットの keydown は従来通りページ側へ', pageSaw === 1, String(pageSaw));
+  f.w.removeEventListener('keydown', probe, true);
+
   pressAlt(f, 'ArrowDown', { altKey: true, shiftKey: true });
   check('Shift+Alt+↓ はショートカットでなく中断側に回る', f.nav.jumpState() === null, JSON.stringify(f.nav.jumpState()));
   pressAlt(f, 'ArrowUp', { altKey: true, ctrlKey: true });
