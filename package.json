@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node tests/composer-detection.test.mjs"
+    "test": "node tests/composer-detection.test.mjs && node tests/nav-rail.test.mjs"
   },
   "devDependencies": {
     "jsdom": "^30.0.1"

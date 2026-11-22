@@ -16,15 +16,17 @@ ChatGPT の Chat モードと Work モードの入力欄で Enter キー挙動�
 
 ```
 chatgpt-enter-key/
-├── manifest.json   # MV3 定義。content_scripts で chatgpt.com に content.js を注入するだけ
-├── content.js      # 全ロジック（入力欄判定 / IME 判定 / Enter・Ctrl+Enter 処理）
+├── manifest.json   # MV3 定義。content_scripts で chatgpt.com に content.js / nav.js を注入するだけ
+├── content.js      # Enter キー系ロジック（入力欄判定 / IME 判定 / Enter・Ctrl+Enter 処理）
+├── nav.js          # 右端の会話ナビゲーションバー（回答検出 / キャッシュ / ジャンプ / ハイライト）
 └── README.md       # 本ファイル
 
 docs/
 └── chatgpt-dom-sample.txt          # 実 ChatGPT DOM の参考サンプル（判定の根拠にはしない）
 
 tests/
-└── composer-detection.test.mjs     # 入力欄判定の静的自動テスト（jsdom。§7）
+├── composer-detection.test.mjs     # 入力欄判定の静的自動テスト（jsdom。§7）
+└── nav-rail.test.mjs               # ナビバーの静的自動テスト（jsdom。§8）
 ```
 
 ### content.js の仕組み（要点）
@@ -135,7 +137,7 @@ ARIA 属性（`role="textbox"` / `aria-multiline="true"`）は補助シグナル
 - [ ] `Enter` 改行が ChatGPT 側の状態に反映され、送信時に改行として届く
 - [ ] `Ctrl+Z` などの Undo / Redo、ペースト後の改行が壊れない
 - [ ] ページ遷移（新規チャット・履歴選択）後もそのまま機能する
-- [ ] Console に `[ChatGPT Enter Key] v0.9.2 読み込み完了 (world=MAIN, run_at=document_start) ... Enter 方針=remapToShiftEnter` が 1 行だけ出ている（＝注入されている）
+- [ ] Console に `[ChatGPT Enter Key] v0.10.5 読み込み完了 (world=MAIN, run_at=document_start) ... Enter 方針=remapToShiftEnter` が 1 行だけ出ている（＝注入されている）
 - [ ] `window.__chatgptEnterKeyProbe('form[data-chatgpt-composer] [contenteditable="true"]')` が
       `accepted: true`、`evidence.inComposerContainer: true` を返す
       （`evidence.promptId` と `evidence.promptFallbackNearby` は false でも受理される）
@@ -202,7 +204,7 @@ DevTools の context で本拡張を選べば `__chatgptEnterKeySelfTest()`（�
 
 | 症状 | ログの征兆 | 対応 |
 | --- | --- | --- |
-| そもそも効いていない | `v0.9.2 読み込み完了` が出ていない | 拡張カードの更新後、タブを完全に閉じて開き直す／拡張が有効か／`chatgpt.com` か |
+| そもそも効いていない | `v0.10.5 読み込み完了` が出ていない | 拡張カードの更新後、タブを完全に閉じて開き直す／拡張が有効か／`chatgpt.com` か |
 | **`Enter` が送信される（ログは出ている）** | `remappedShiftKey` を確認 | `true` でなければイベント変更に失敗。誤送信防止の停止処理が働く |
 | `Enter` で改行されない | `Enter` に対するログが 1 行も無い | 入力欄を特定できていない。自己診断で `accepted: false` ばかりなら `window.__chatgptEnterKeyProbe('form[data-chatgpt-composer] [contenteditable="true"]')` の `evidence` でどの根拠が消えているか確認し、`isComposerInput` の条件を更新 |
 | 改行だけ増えない | `Enter 操作後も composer の DOM が変わっていません` | 詳細ログを有効にし、`remappedShiftKey: true` と keypress / keyup の引き継ぎを確認する |
@@ -300,3 +302,213 @@ npm test             # = node tests/composer-detection.test.mjs
 jsdom に `isContentEditable` と `getClientRects()` の実装が無いため、テスト側でブラウザの挙動を
 再現している（`content.js` 側は触らない）。キーイベントの委譲も jsdom で検査する。
 実 ChatGPT DOM とブラウザでの改行・送信結果は §3 の手動テストで確認すること。
+
+## 8. 会話ナビゲーションバー（nav.js）
+
+画面右端の上部に、各 ChatGPT 回答に対応する短い横線を縦に並べる固定バーを表示する。
+旧公式 UI の会話ナビゲーションに相当する機能で、**非公開 API は使わず DOM の観察だけ**で実装している。
+
+### 動作
+
+| 要素 | 挙動 |
+| --- | --- |
+| 横線（マーカー） | 回答 1 件につき 1 本。会話内の回答順に等間隔。クリック領域は線の見た目より広い（22px 幅の行） |
+| クリック（DOM 在位） | 実測位置からヘッダーオフセットを引いた地点へ `smooth` スクロール |
+| クリック（キャッシュのみ） | 記録済み位置へ `auto` で飛び、仮想スクロールの再描画を監視。再出現した実要素へ **1 回だけ**補正。再描画が来なければ時間切れで打ち切り（無限リトライしない） |
+| 通常グレー | 回答が DOM に存在（opacity 0.7） |
+| 薄いグレー | キャッシュのみ＝仮想化で DOM から消えている（opacity 0.3）。マーカーは消さない |
+| 青色・長め | 表示領域上部の基準線を最後に通過した回答（現在位置）。在 DOM 状態より優先（opacity 1.0） |
+| ホバー | 回答本文の冒頭（約 180 字）をツールチップ表示 |
+| 多量回答 | バー高を画面内（72vh）に収め、間隔縮小 → 最小でも収まらなければバー内スクロール |
+| テーマ | ライト／ダーク（`html.dark` クラス基準。OS `prefers-color-scheme` もフォールバック） |
+
+### 仮想スクロール対応の設計
+
+- 検出単位は `h4[data-conversation-role="assistant"]` の**親要素（回答コンテナ）**。
+  識別キーは `data-turn-key` + `data-response-body`（messageId）で、同一ターン内の複数回答も区別する。
+- 検出した回答はメモリ内キャッシュに保持（`turnKey / messageId / preview / scrollPosition /
+  relativePosition / lastSeen / inDOM`）。DOM 要素参照はvolatile な再取得用で、識別には使わない。
+- 仮想化で消えた回答は `inDOM=false` にして**保持**。再次出現で `inDOM=true` に戻る。
+  削除は「同一ターンが DOM に残っているのに当該回答だけ存在しない」
+  ＝編集・再生成・分岐変更で置き換えられた場合のみ（単なる非描画を削除根拠にしない）。
+- 並び順は「今回 DOM で観察できた前後の既知回答」優先で挿入。前後不明時のみスクロール位置を補助に使う。
+- 未描画（一度も DOM に出ていない）回答の件数・ID は推測しない。
+  会話をスクロールして閲覧すると検出済みマーカーが徐々に増えていく。
+- 会話切り替え（URL の `/c/<id>`）でキャッシュを全消去。新規チャットの ID 未確定→確定は同一会話として adopt。
+- `MutationObserver` は transcript を監視し、変更は 180ms 合流でまとめて再スキャン。
+  ナビ UI 自身の mutation はスキップする。回答生成中も「構造シグネチャ（キー順+在DOM状態）不変なら
+  DOM 組み替えなし」でフィードバックループを断つ。位置更新とハイライトは rAF で間引く。
+- ジャンプ中は wheel / touch / PageUp 等の手動入力で自動補正を中断し、ユーザー操作を優先する。
+- **UI イベントガード**（v0.10.2）: バー上の pointer/click 系イベントを
+  window キャプチャ段（document_start でページ本体より先に登録）で止める。
+  これをしないと ChatGPT の「アプリ内クリック→composer 再フォーカス→
+  最新へスクロール」に拾われ、**ジャンプ直後に会話最下部へ引き戻される**。
+  - mousedown / pointerdown(mouse) は preventDefault でフォーカス強奪を防止
+  - touchstart/touchend は preventDefault しない（合成クリックが消えるため）
+  - クリック自体はガード内で `onRowClick()` に渡すのでジャンプは従来どおり
+  - バー外（ChatGPT 本来の UI）のイベントには一切干渉しない
+- **最下部拉致（ひきつけ）検知・再発射**（v0.10.2 保険）: ジャンプ発射から 60ms〜1.2s の窓で、
+  「目標より 1ビューポート以上下の最下部に吸着している」場合は目標へ1回だけ再発射する。
+  利用者の手動入力は `cancelJump()` で打ち消すため、無操作のときだけ動作する。
+- **合成意図ホイール**（v0.10.3）: v0.10.2 でも「冒頭へ飛ぶ→最下部へ戻る」が
+  往復する症状が残った。原因はクリックの伝播ではなく**我々のプログラム的スクロール
+  自体**が ChatGPT の「最新への自動追従」に意図なしと判定され直後に最下部へ
+  引き戻されること。そこでジャンプ発射前後で `deltaY=±2` の微小 wheel を
+  合成発射し「利用者のスクロール意図」を伝える（`debug` ログ: `send user scroll intent`）。
+  - ジャンプ中は 120ms 間隔・発射から 700ms 窓で間欠発射（checkJump が pump）
+  - 方向は実際の移動方向と一致（下ジャンプ＝deltaY>0、上ジャンプ＝deltaY<0）。
+    v0.10.4 までは「原則上方向（離脱）」だったが、嘘の方向は ChatGPT の
+    ホイール処理と喧嘩して下方向ジャンプが潰れるため v0.10.5 で一致式に変更
+  - イベントには `__cnavIntent` マークを付け、我々自身の wheel 中断では打ち消さない
+  - 再発射（re-assert）は可視の反動が少ない `auto`（即時着地）に変更
+- **飲み込み（Pin）自動検知・再発射**（v0.10.4）: 実機で「1回目はスクロールが
+  全く発火せず、2回目のクリックで飛ぶ」症状が確認された。最初のプログラム的
+  スクロールが ChatGPT 側の Scroll Pin に無効化されるためと見られる。
+  そこでジャンプ発射から 250ms 経っても scrollTop が発射直前の位置から
+  4px 以上動いていなければ「未実行」とみなし、意図ホイールを添えて
+  1 回だけ auto（即時）で再発射する（无限リトライ禁止・拉致保険と 1 回上限を共有）。
+  - 検知時は既定レベル（warn）で `jump が未実行のようだと検知…再発射` と出る
+  - 実際のスクロールは 250ms 以内に着地/進行するため誤検知しにくい
+  - 絶対位置（scrollPosition）が欠けたキャッシュは relativePosition×scrollHeight
+    で推定ジャンプ（暫定値。再出現後の実測補正が本体）
+  - 飲み込みで scroll イベントが発生しなくても回るよう、jumpTo 自身が
+    rAF ループ（checkJump の運転手）を起動する
+- **trusted 入力限定の中断**（v0.10.5）: 実機で「上方向ジャンプは効くが、
+  上の方を閲覧中に下方向のマーカーをクリックするとスクロール自体が
+  起きない」症状が確認された。ChatGPT は入れ子スクローラからホイールを
+  再ディスパッチ（転送）することがあり、その untrusted イベントが
+  「マークなしのユーザー操作」として我々の中断リスナーに刺さり、
+  ジャンプ開始直後に自分自身で中断していたためと見られる。
+  - wheel/touchstart での中断は `isTrusted` の本物の入力だけ採用
+    （利用者の実ホイール／タッチでの中断要件はそのまま成立）
+  - `__cnavIntent` マーク付きイベントは従来どおり無視
+  - デバッグ/検証: `__chatgptNav.internals.setTrustedOnlyCancel(false)`
+    で合成ホイールも中断扱いにできる（jsdom では trusted を作れないため、
+    テストはこのスイッチで「wheel＝中断」挙動を検証）
+- **スクローラ自己検証と scrollIntoView フォールバック**（v0.10.6）:
+  「スクロールが一切起きない」残りの原因として、我々が選ぶスクロール
+  コンテナの誤認（React 再マウントで stale / overflow 要素違い）を潰す。
+  - jumpTo 時に cached scroller が detached なら再解決。スクロール不能要素ならログ
+  - stuck 再発射で `scrollTo` がページを動かせなかった場合のみ、
+    在位回答要素に対して `scrollIntoView({behavior:'auto'})` を試行
+    （ブラウザがスクローラ自体を探しに行くのでコンテナ誤認に強い）
+  - 全工程をリングログに記録（上の「診断」参照）
+- **stall 検知・LIVE 実測補正（v0.10.7・根本原因）**:
+  実機リングログで真因が確定した。上方向ジャンプ中、スクロールは
+  正常に動き始めていたが（14750→…→10815）、途中で ChatGPT の仮想化
+  reflow が走りスクロールコンテナ高が 16072→13004 に変化。上部の
+  座標系ごとシフトして発射時に保存した target（9420）が無意味化し、
+  smooth アニメーションは 7646 で死亡 → 目的回答を通り越して止まる。
+  下方向「無反応」も同型（発射直後に reflow でアニメが死に、
+  「発射位置から ≤4px」の stuck 条件をちょうど外れて放置されていた）。
+  - 対策：smooth 中に 220ms 以上ピクリとも動かない & 未着地を
+    「停滞」とみなし、**保存済み target を捨てて LIVE の DOM 実測**
+    （resolveLiveContainer の現在 rect）から auto で補正する
+  - stall 補正の直後は停滞タイマーもリセット（approx 補正→smooth 継承時
+    の誤発火防止）
+  - 検知時は warn レベルで `jump が途中で停滞…LIVE 実測へ補正` を出力
+- **補正予算・rel re-aim（v0.10.8）**:
+  実機ログ（cache-only→補正→再 reflow）で「reflow は 1 回で終わらない」
+  ことが判明：補正 smooth の走行中に ChatGPT がさらに追加ターンを
+  レンダリングして座標が再帰的にshift し、単発の stallFixed だと
+  「LIVE 要素が見つからない」で予算を使い切りタイムアウトした。
+  - 補正は `JUMP_MAX_FIXES = 3` の**予算式**に変更（LIVE 実測 auto が
+    最大 3 発。無限リトライ禁止は維持）
+  - stall 中に LIVE 要素が不在のときは、キャッシュの relativePosition
+    × 現在の maxScroll で **1 回だけ rel re-aim**（絶対位置は reflow で
+    死んでいるが相対割合は有効、という前提）し、approx に戻って
+    再描画を待つ。再出現後は auto 補正で着地
+  - approx→実測補正も smooth ではなく **auto（即時）** に変更。
+    smooth 走行窗の間に reflow が入ると座標が壊れるため、即時着地が
+    最も事故が少ない
+  - 毎 tick で scrollHeight の変化を `jump sh changed Δ=…` として記録。
+    stall 失敗時は `probeLive`（turnKey が DOM に在るか／response-body
+    在否／現在レンダリング中の turnKey 一覧）をログに出すので、
+    「どこに DOM ウィンドウがあるのに目的が居ないのか」が唯一定位できる
+  - jumpState() は `fixes`（消費予算）/ `reaimed` も返す
+- **会話順アンカー再推定・hill-climb re-aim（v0.10.9・真因対策）**:
+  v0.10.8 の rel re-aim は実機で失敗した（「上方向は成功、そこから
+  下方向は失敗」）。実測で **cached な絶対位置も relativePosition も
+  仮想化の崩壊フレームではどちらも壊れる**ことが確定：上方 culling で
+  `abs' = abs − Δ; sh' = sh − Δ` のため rel まで変わる（同一 turn が
+  sh=13004 で rel≈0.50、崩壊後 sh=7607 で rel=0.14 等）。
+  仮想化で崩れない不変条件は ①ターン自高（data-virtualized-turn の
+  offsetHeight）②items[] の会話順 ③「レンダリング済みブロックは
+  画面に居る」こと。**この3点だけで目標位置を再推定する**方式に変更：
+  - scan 時に `turnHeights`（turnKey→ターン自高）をキャッシュ
+  - `guessAbsFromRendered()`: 現在 DOM に在る回答の turn 実測位置を
+    アンカーに、会話順の差分（ターン自高＋間隔 TURN_GAP_PX の積み上げ、
+    未知の高さは平均でごまかさず null）で目標の絶対位置を算出
+  - `tryGuessReaim()`：目標が未レンダリング（approx）/ stall 中に LIVE
+    要素不在のとき、500ms クールダウン・**guesses 最大 5（fixes と別枠）**
+    でアンカー推定→auto 発射→approx 復帰を繰り返し、reflow を追跡する。
+    材料がアンカーのみで推定できない時だけ従来通り rel×max にフォールバック
+  - jumpTo（cache-only）の初期 base も `anchor > pos > rel` の優先順で選ぶ
+    （`baseSrc=anchor|pos|rel` をログに出す）
+  - 追跡ログ強化：`src=rendered-anchor|rel`、`guess#N`、tick の `g=`、
+    `baseSrc=`、keep-wait 時の `probeLive`（レンダリング中 turnKey 一覧）
+  - jumpState() に `guesses` を追加
+
+### 手動テスト項目（nav）
+
+- [ ] 会話画面の右端上部に横線が縦に並び、回答数と一致する（スクロールして閲覧すると増えていく）
+- [ ] 横線をクリックすると該当回答の冒頭へ移動する（固定ヘッダーに埋もれない）
+- [ ] 横線クリック後、**最下部へ引き戻されずにそのまま留まる**（v0.10.3 の
+      合成意図ホイールが効いていることの確認。反動が起きたら `debug` ログを見る）
+- [ ] 会話を上下スクロールすると現在位置の横線が青色（長く）になる
+- [ ] 上方にスクロールして回答が仮想化で消えると、そのマーカーは薄いグレーで**残る**
+- [ ] 薄いグレー（キャッシュのみ）のマーカーをクリックすると、記録位置へ飛んでから
+      該当回答の冒頭へ補正される（補正は最大 1 回）
+- [ ] 補正待ちの最中にホイールで操作すると自動補正が止まり、手動操作が優先される
+- [ ] 回答生成中（本文が伸びている間）もバーが暴れず、既存の横線はそのまま、新しい回答が末尾に増える
+- [ ] 別会話へ切り替えるとマーカーが全入れ替わり、前会話のが混在しない
+- [ ] 新規チャットで最初の送信後 URL が /c/<id> になっても検出済みマーカーが消えない
+- [ ] 回答の再生成後、置き換えられた旧マーカーが消え新回答のマーカーになる
+- [ ] ライト／ダーク両モードで背景に馴染み、入力欄・スクロールバー・ボタンを妨げない
+- [ ] 長い会話（多数の回答）でもカクつき・CPU 高騰がない（DevTools Performance で確認）
+- [ ] `document.body` に `#cnav-root` / `#cnav-bar` があり、transcript の外側で
+      MutationObserver の再発火要因になっていない
+
+### 診断
+
+- **リングログ（v0.10.6〜）**: ログレベルに関係なく直近 300 件のイベントを常に記録。
+  不具合再現後にコンソールで:
+  ```js
+  copy(__chatgptNav.log())   // 全文がクリップボードへ
+  __chatgptNav.log()         // 文字列で返すだけ
+  __chatgptNav.clearLog()    // リングを空にする
+  ```
+  クリック→ジャンプ→中断/着地/打ち切りまでが `[+経過ms] イベント 詳細` で並ぶ。
+  記録されるもの: UI 上のクリック、ジャンプ開始（scroller/現在位置/目標）、
+  jump tick（50ms 間隔で現在位置と目標の推移）、wheel/touch の混入
+  （trusted/marked 判定も）、scroll イベント、stuck 検知・再発射、
+  拉致検知、完了/タイムアウト/キャンセル理由、scan 中の対象状態。
+  **「飛まない」が起きたらこのログ paste 一発で原因が特定できる。**
+- `window.__chatgptNav.snapshot()` … 会話ID・アクティブキー・キャッシュ済み回答一覧
+- `window.__chatgptNav.jumpState()` … ジャンプ中状態（`null` なら待機）。
+  `startScroll`（発射直前の位置）/ `reasserted`（再発射済みか）も含む
+- `window.__chatgptNav.jumpTo(key)` … プログラムからジャンプ（成否 boolean）
+- ログ: `localStorage.setItem('chatgptNavLogLevel', 'debug')`（既定 `warn` ＝ジャンプ失敗等の警告のみ表示 / `off` で無音）
+  - マーカークリック→ジャンプ開始・補正・打ち切りは `debug` で1行ずつ確認できる
+  - ジャンプ失敗（クロールコンテナ不明・位置未記録・古い行）は既定の `warn` で `[ChatGPT Nav]` 付き出る
+
+### 自動テスト（静的）
+
+```sh
+npm install
+npm test   # = composer-detection.test.mjs && nav-rail.test.mjs
+```
+
+`tests/nav-rail.test.mjs` は jsdom 上に spec 相当の仮想化 DOM を組み、
+`window.__chatgptNav` 経由で以下を検証する（レイアウト系はスタブ再現）。
+
+- 検出: 見出しの親＝回答コンテナ単位・キー（turnKey\|messageId）・プレビュー
+- キャッシュ: 仮想化消失で inDOM=false・再出現で true・`.off` クラスの濃淡
+- 並び順: 後から上に現れた回答が DOM 前後関係どおり前挿入され、再スキャンで崩れない
+- 削除: ターン残存で回答のみ消えたら破棄／ターンごと消えたら保持
+- 会話切り替え: 全消去、および null→ID の adopt
+- 位置: scrollPosition / relativePosition の記録
+- ジャンプ: inDOM=smooth／cache-only=approx→再出現後 1 回だけ補正→完了解除／
+  再描画なしは時間切れ打ち切り／wheel・PageDown で中断／失敗キーは false
+- ハイライト: 基準線最終通過回答が `.cur`／全回答が基準線下なら非表示（誤強調しない）
+- 描画: 構造不変なら行を生成し直さない（回答生成中のループ防止）
