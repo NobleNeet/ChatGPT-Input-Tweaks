@@ -1469,6 +1469,142 @@ const snapItems = (nav) => nav.snapshot().items;
   f.dom.window.close();
 }
 
+// ======================================================================
+// 25) ショートカットジャンプ: Alt+↑/↓ ＝ 1つ上/下の回答冒頭、Alt+K/J 別名
+//     基準は jump 中なら jump.key／そうでなければ activeKey。
+//     未知時は記録位置で近似。端で折り返さず、自分のジャンプを中断しない
+// ======================================================================
+function pressAlt(f, key, mods = {}) {
+  f.w.dispatchEvent(new f.w.KeyboardEvent('keydown', Object.assign({ key, bubbles: true }, mods)));
+}
+{
+  // 25a) activeKey 起点の歩き・别名・キャンセル側除外
+  const f = loadNav();
+  mount(f, [
+    { turnKey: 'T1', answers: [{ msg: 'M1', text: '回答一' }] },
+    { turnKey: 'T2', answers: [{ msg: 'M2', text: '回答二' }] },
+    { turnKey: 'T3', answers: [{ msg: 'M3', text: '回答三' }] },
+  ]);
+  const unitOf = (tk) => f.doc.querySelector(`[data-turn-key="${tk}"] [data-content-search-unit-key]`);
+  f.doc.getElementById('scroller').scrollTop = 1000;
+  // abs = st(1000)+rel: T1=1050（基準線通過）/ T2=1650 / T3=2250
+  stubRect(unitOf('T1'), 50);
+  stubRect(unitOf('T2'), 650);
+  stubRect(unitOf('T3'), 1250);
+  f.nav.scan();
+  const [k1, k2, k3] = snapItems(f.nav).map((i) => i.key);
+  check('25a active は T1', f.nav.highlight() === k1, String(f.nav.highlight()));
+  check('25a 出発前にジャンプ無し', f.nav.jumpState() === null);
+
+  pressAlt(f, 'ArrowDown', { altKey: true });
+  check('Alt+ArrowDown → 1つ下（T2）', f.nav.jumpState() && f.nav.jumpState().key === k2, JSON.stringify(f.nav.jumpState()));
+  pressAlt(f, 'ArrowDown', { altKey: true });
+  check('連打は jump.key 基準で連鎖（T3）', f.nav.jumpState() && f.nav.jumpState().key === k3, JSON.stringify(f.nav.jumpState()));
+  pressAlt(f, 'ArrowUp', { altKey: true });
+  check('Alt+ArrowUp → 1つ上（T2）', f.nav.jumpState() && f.nav.jumpState().key === k2, JSON.stringify(f.nav.jumpState()));
+  pressAlt(f, 'j', { altKey: true });
+  check('Alt+j 別名 = next（T3）', f.nav.jumpState() && f.nav.jumpState().key === k3, JSON.stringify(f.nav.jumpState()));
+  pressAlt(f, 'K', { altKey: true });
+  check('Alt+K 別名 = prev（T2）', f.nav.jumpState() && f.nav.jumpState().key === k2, JSON.stringify(f.nav.jumpState()));
+
+  const stAlt = f.nav.jumpState();
+  pressAlt(f, 'j'); // Alt 無しはショートカットでも中断キーでもない
+  check('j 単体（Alt無し）はジャンプを変えない', f.nav.jumpState() && f.nav.jumpState().key === (stAlt && stAlt.key), JSON.stringify(f.nav.jumpState()));
+
+  pressAlt(f, 'ArrowDown', { altKey: true, shiftKey: true });
+  check('Shift+Alt+↓ はショートカットでなく中断側に回る', f.nav.jumpState() === null, JSON.stringify(f.nav.jumpState()));
+  pressAlt(f, 'ArrowUp', { altKey: true, ctrlKey: true });
+  check('Ctrl+Alt+↑ はショートカットでなく中断側に回る', f.nav.jumpState() === null);
+
+  // 自分のジャンプを自分で中断しないこと（代替で生き続けていること自体が証明）。
+  // 既存の素の矢印キーでの中断はそのまま。
+  f.nav.jumpTo(k2);
+  check('ジャンプ再開（T2）', f.nav.jumpState() && f.nav.jumpState().key === k2);
+  pressAlt(f, 'ArrowUp', { ctrlKey: true });
+  check('素の Ctrl+↑（ショートカット外）は中断する', f.nav.jumpState() === null);
+  f.nav.jumpTo(k2);
+  pressAlt(f, 'ArrowDown'); // 素の ArrowDown
+  check('素の ↓ は従来通り中断', f.nav.jumpState() === null);
+  f.dom.window.close();
+}
+{
+  // 25b) 端では折り返し no-op
+  const f = loadNav();
+  mount(f, [
+    { turnKey: 'T1', answers: [{ msg: 'M1', text: '回答一' }] },
+    { turnKey: 'T2', answers: [{ msg: 'M2', text: '回答二' }] },
+    { turnKey: 'T3', answers: [{ msg: 'M3', text: '回答三' }] },
+  ]);
+  const unitOf = (tk) => f.doc.querySelector(`[data-turn-key="${tk}"] [data-content-search-unit-key]`);
+  f.doc.getElementById('scroller').scrollTop = 1000;
+  stubRect(unitOf('T1'), 50);
+  stubRect(unitOf('T2'), 650);
+  stubRect(unitOf('T3'), 1250);
+  f.nav.scan();
+  const [k1, , k3] = snapItems(f.nav).map((i) => i.key);
+  check('25b active は T1（先頭）', f.nav.highlight() === k1);
+  pressAlt(f, 'ArrowUp', { altKey: true });
+  check('先頭で Alt+↑ は no-op', f.nav.jumpState() === null, JSON.stringify(f.nav.jumpState()));
+
+  stubRect(unitOf('T1'), -2200);
+  stubRect(unitOf('T2'), -1200);
+  stubRect(unitOf('T3'), -50);
+  check('25b active を T3（末尾）へ', f.nav.highlight() === k3);
+  pressAlt(f, 'ArrowDown', { altKey: true });
+  check('末尾で Alt+↓ は no-op', f.nav.jumpState() === null, JSON.stringify(f.nav.jumpState()));
+  f.dom.window.close();
+}
+{
+  // 25c) activeKey 不明時の記録位置近似（仮想化で消えたキャッシュへの prev）
+  //  ※ updateActive には「2ビューポート以内のキャッシュ補完」があるため、
+  //    active を本当に不明にするには記録位置を 2vp より遠くへ置く必要あり
+  const f = loadNav();
+  mountWith(f, 16000, 800, [
+    { turnKey: 'T0', answers: [{ msg: 'M0', text: '回答零' }] },
+    { turnKey: 'T1', answers: [{ msg: 'M1', text: '回答一' }] },
+    { turnKey: 'T2', answers: [{ msg: 'M2', text: '回答二' }] },
+  ]);
+  const unitOf = (tk) => f.doc.querySelector(`[data-turn-key="${tk}"] [data-content-search-unit-key]`);
+  f.doc.getElementById('scroller').scrollTop = 1000;
+  // 全て基準線より下（rel>off）なので active は決まらない
+  stubRect(unitOf('T0'), 200); // abs 1200
+  stubRect(unitOf('T1'), 400); // abs 1400
+  stubRect(unitOf('T2'), 600); // abs 1600
+  f.nav.scan();
+  check('25c active 不明', f.nav.highlight() === null, String(f.nav.highlight()));
+  const [k0, k1, k2] = snapItems(f.nav).map((i) => i.key);
+  void k0; void k2;
+
+  // T0/T1 が仮想化で DOM から消える（記録位置は 1200/1400 のまま）
+  // mountWith で作り直す（scroller は st=0 にリセットされる）ので大きい.scrollHeight を維持する
+  mountWith(f, 16000, 800, [{ turnKey: 'T2', answers: [{ msg: 'M2', text: '回答二' }] }]);
+  f.doc.getElementById('scroller').scrollTop = 5000;
+  stubRect(unitOf('T2'), 300); // 画面内だが基準線より下（rel=300）、abs 5300
+  f.nav.scan();
+  check('25c 再スキャン後も active 不明（記録が 2vp 以上遠い）', f.nav.highlight() === null, String(f.nav.highlight()));
+
+  pressAlt(f, 'ArrowUp', { altKey: true });
+  check('active 不明でも prev ＝ 上端より上の最後の記録（T1）へ approx',
+    f.nav.jumpState() && f.nav.jumpState().key === k1 && f.nav.jumpState().phase === 'approx',
+    JSON.stringify(f.nav.jumpState()));
+
+  // ジャンプを落としてから next の近似を確認（jump.key 基準にならない状態で）
+  pressAlt(f, 'PageUp');
+  check('PageUp で中断', f.nav.jumpState() === null);
+  pressAlt(f, 'ArrowDown', { altKey: true });
+  check('active 不明 next ＝ 下端より下の最初の記録（T2）へ',
+    f.nav.jumpState() && f.nav.jumpState().key === k2, JSON.stringify(f.nav.jumpState()));
+  f.dom.window.close();
+}
+{
+  // 25d) 回答未ロードでは例外も出さず no-op
+  const f = loadNav();
+  pressAlt(f, 'ArrowDown', { altKey: true });
+  pressAlt(f, 'k', { altKey: true });
+  check('未ロードでは no-op（例外なし・ジャンプなし）', f.nav.jumpState() === null);
+  f.dom.window.close();
+}
+
 // ---- 結果 ---------------------------------------------------------------
 
 let failed = 0;

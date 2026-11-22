@@ -31,7 +31,7 @@
 
   // ---- 定数 --------------------------------------------------------------
 
-  const NAV_VERSION = '0.10.9';
+  const NAV_VERSION = '0.10.10';
   const LOG_TAG = '[ChatGPT Nav]';
   const LOG_STORAGE_KEY = 'chatgptNavLogLevel';
 
@@ -1437,6 +1437,85 @@
     }
   }
 
+  // ---- ショートカットジャンプ（Alt+↑/↓ ＝ 1つ上/下の回答冒頭、Alt+K/J 別名）----
+  // Ctrl/Cmd はダウンロード・omnibox・タブ切替・選択拡張・入力欄の段落移動など
+  // ブラウザ既定と構造的に衝突するため使わない。Alt は本拡張の「非干渉モディファイア」。
+  // ジャンプ機構自体は jumpTo（キャッシュ＋アンカー再実測）をそのまま再利用するので、
+  // 仮想化された長会話でも連打で何件でも歩き続けられる。
+
+  const SHORTCUT_JUMP_KEYS = {
+    ArrowUp: 'prev',
+    ArrowDown: 'next',
+    k: 'prev',
+    j: 'next',
+  };
+
+  /**
+   * この keydown がジャンプショートカットかどうか。
+   * @returns {'prev'|'next'|null} Ctrl/Cmd/Shift の併用と IME 変換中は対象外。
+   */
+  function shortcutDir(e) {
+    if (!e || !e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return null;
+    if (e.isComposing) return null; // IME 変換中は横取りしない
+    const k = typeof e.key === 'string' ? e.key : '';
+    if (Object.prototype.hasOwnProperty.call(SHORTCUT_JUMP_KEYS, k)) return SHORTCUT_JUMP_KEYS[k];
+    if (k.length === 1) return SHORTCUT_JUMP_KEYS[k.toLowerCase()] || null;
+    return null;
+  }
+
+  /**
+   * dir 方向の隣回答キーを返す。
+   * 基準は jump 中なら jump.key（＝向かっている回答）、そうでなければ
+   * activeKey（青マーカー）の会話順インデックスに対する ±1。
+   * ジャンプ中は activeKey がまだ古いので、jump.key 基準にしないと
+   * 連打が同じ回答を再目標化して歩かない。
+   * 基準キーが無い時は記録位置からの近似：
+   *   prev ＝ ビューポート上端より上に記録開始がある最後の回答
+   *   next ＝ ビューポート下端より下に記録開始がある最初の回答
+   * 端（隣が無い）は折返しせず null（＝no-op）。
+   */
+  function neighborKey(dir) {
+    if (!items.length) return null;
+    const baseKey = (jump && jump.key) || activeKey;
+    if (baseKey) {
+      const idx = items.findIndex((it) => it.key === baseKey);
+      if (idx >= 0) {
+        const nb = dir === 'prev' ? items[idx - 1] : items[idx + 1];
+        return nb ? nb.key : null;
+      }
+    }
+    const sc = getScroller();
+    if (!sc) return null;
+    const top = sc.scrollTop;
+    const bottom = top + (sc.clientHeight || window.innerHeight || 800);
+    if (dir === 'prev') {
+      for (let i = items.length - 1; i >= 0; i--) {
+        const p = items[i].scrollPosition;
+        if (Number.isFinite(p) && p < top) return items[i].key;
+      }
+    } else {
+      for (let i = 0; i < items.length; i++) {
+        const p = items[i].scrollPosition;
+        if (Number.isFinite(p) && p > bottom) return items[i].key;
+      }
+    }
+    return null;
+  }
+
+  function onShortcutKeydown(e) {
+    const dir = shortcutDir(e);
+    if (!dir) return;
+    e.preventDefault(); // Windows の Alt メニュー発火などを抑止
+    const key = neighborKey(dir);
+    if (!key) {
+      dbg('shortcut no-op', dir, `items=${items.length}`, `active=${activeKey}`);
+      return;
+    }
+    const idx = items.findIndex((it) => it.key === key);
+    dbg('shortcut jump', dir, `idx=${idx}`, `key=${key}`, `from=${activeKey}`);
+    jumpTo(key);
+  }
+
   function attachEvents() {
     // 中断に採用するのは「本物の入力」(isTrusted) だけ。
     // ChatGPT は入れ子スクローラからホイールを再ディスパッチ（転送）する
@@ -1474,7 +1553,13 @@
       if (t && t.id === 'cnav-bar') return; // バー自身の内部スクロールは無視
       dbg('scroll evt', describeEl(t), `st=${t && typeof t.scrollTop === 'number' ? t.scrollTop : '?'}`);
     }, { capture: true, passive: true });
+    // ショートカットジャンプは中断より先に登録する（preventDefault を先に出す）。
+    window.addEventListener('keydown', onShortcutKeydown, { capture: true });
     window.addEventListener('keydown', (e) => {
+      // 隣回答ジャンプのキーは「手動入力＝中断」に数えない。
+      // 数えると同一イベント内で、自分が発射したジャンプを
+      // 自分で打ち消す（Alt+矢印の e.key は 'ArrowDown' 等だから）。
+      if (shortcutDir(e)) return;
       if (JUMP_CANCEL_KEYS.has(e.key)) cancelJump(`key:${e.key}`);
     }, { capture: true });
     window.addEventListener('resize', () => {
