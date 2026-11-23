@@ -31,7 +31,7 @@
 
   // ---- 定数 --------------------------------------------------------------
 
-  const NAV_VERSION = '0.10.12';
+  const NAV_VERSION = '0.10.13';
   const LOG_TAG = '[ChatGPT Nav]';
   const LOG_STORAGE_KEY = 'chatgptNavLogLevel';
 
@@ -60,6 +60,13 @@
   const JUMP_REASSERT_WINDOW_MS = 1200;
   const JUMP_REASSERT_MIN_WAIT_MS = 60; // smooth/scroll 発射直後の一瞬は除外
   const JUMP_SNAP_TOL = 4;            // 「最下部に居る」判定の誤差 [px]
+
+  // v0.10.13: 下端 pull 検知後、アンカー推定も max と一致して打つ手が
+  // 無いとき、少し待ってから jumpTo をまるごと再発射する（手動で
+  // 「もう一回クリック」と同じ。ChatGPT の再測高を待って撃ち直す）。
+  // 無限ループ防止に上限を設ける。
+  const JUMP_BOTTOM_PULL_REFIRE_MAX = 2;   // 再発射上限回数
+  const JUMP_BOTTOM_PULL_REFIRE_MS = [600, 1200]; // 予約待ち時間 [ms]
 
   // 合成ホイール＝「利用者のスクロール意図」信号。我々のプログラム的スクロールを
   // ChatGPT の「自動追従（最下部固定）」が直後に最下部へ引き戻す症状
@@ -1141,6 +1148,55 @@
     return true;
   }
 
+  /**
+   * v0.10.13: 下端 pull 検知後の二段構え。
+   *  1) tryGuessReaim（LIVE アンカー再推定）→ ズレていれば発射して復旧
+   *  2) est が現在位置（=max）と変わらず打つ手が無い場合、保留して
+   *     jumpTo をまるごと再発射（ChatGPT の再測高待ち。実測で
+   *     「もう一回クリックは効く」の自動版）。上限 JUMP_BOTTOM_PULL_REFIRE_MAX。
+   * @returns {boolean} true = この場では着地扱いしない（再照準 or 保留中）
+   */
+  function handleBottomPull(j, sc, item, now, tag) {
+    j.lastGuessAt = 0;
+    if (tryGuessReaim(j, sc, item, now, tag)) return true;
+    if ((j.pullRetries || 0) >= JUMP_BOTTOM_PULL_REFIRE_MAX) {
+      // 再発射予算を使い切っても pull が解消しない（ChatGPT がそのフレームで
+      // 目標位置を今も末尾と同一視）＝これ以上手なし。黙って max に
+      // 「着地/完了」すると最新へ拉致されたままなので、明示的に打ち切る。
+      dbg('jump give up at bottom-pull (refire budget exhausted) [' + tag + ']', j.key,
+        `st=${sc.scrollTop}`, `max=${clampMaxScroll(sc)}`, `target=${j.targetScroll}`);
+      logWarn(
+        '下端 pull が再発射でも解消せず打ち切り（最新以外が最下部に吸着）',
+        j.key, `st=${sc.scrollTop}`, `max=${clampMaxScroll(sc)}`
+      );
+      jump = null;
+      return true; // Consumed: caller must not fall through to landing
+    }
+    if (j.pullScheduled) return true; // 予約済み
+    const n = (j.pullRetries || 0) + 1;
+    const wait = JUMP_BOTTOM_PULL_REFIRE_MS[Math.min(n - 1, JUMP_BOTTOM_PULL_REFIRE_MS.length - 1)];
+    const k = j.key;
+    dbg('jump bottom-pull hold → 再発射予約 #' + n + ' [' + tag + ']', k,
+      `wait=${wait}ms`, `st=${sc.scrollTop}`, `max=${clampMaxScroll(sc)}`, `sh=${sc.scrollHeight}`);
+    j.pullRetries = n;
+    j.pullScheduled = true;
+    j.deadline = now + wait + JUMP_APPROX_MS;
+    j.phaseSince = now;
+    j.lastSt = sc.scrollTop;
+    j.lastStAt = now;
+    setTimeout(() => {
+      // 保留中に別ジャンプ・中断・消滅したら何もしない
+      if (!jump || jump.key !== k) return;
+      const ok = jumpTo(k);
+      if (ok && jump) {
+        jump.pullRetries = n; // 予算は継承（リセットしない）
+        dbg('jump bottom-pull 再発射 #' + n + ' [' + tag + ']', k,
+          `phase=${jump.phase}`, `target=${jump.targetScroll}`);
+      }
+    }, wait);
+    return true;
+  }
+
   /** マーカー行クリック → jumpTo。bar に対する委譲で、再生成された行でも効く */
   function onRowClick(key) {
     if (!key) {
@@ -1186,7 +1242,11 @@
       now - (jump.lastIntentAt || 0) >= JUMP_INTENT_MS &&
       now - (jump.phaseSince || jump.issuedAt || now) <= JUMP_INTENT_COVER_MS
     ) {
-      sendScrollIntent(sc, dirOf(sc, jump.targetScroll));
+      // v0.10.13: 最下部 pull 中は下行意図ホイールが「ユーザーは最新を
+      // 見ている」信号になって stick を維持してしまう。pull 検知中だけ
+      // 上方向（離脱）意図に切り替えて stick を外す。
+      const pulled = bottomPulledAtMax(jump, sc);
+      sendScrollIntent(sc, pulled ? -1 : dirOf(sc, jump.targetScroll));
       jump.lastIntentAt = now;
     }
     if (now - (jump.lastTickDbg || 0) >= 50) {
@@ -1261,13 +1321,8 @@
       if (Math.abs(desired - sc.scrollTop) <= 3) {
         if (bottomPulledAtMax(jump, sc)) {
           // 最下部吸着なのに目標は最新以外 → 崩壊フレーム途中の誤着地。
-          // クールダウンを無視して LIVE アンカー再推定で re-aim を試みる。
-          // （アンカー推定が現在位置と一致するなら skip され、次 tick で
-          // 正しいフレームの値で再判定できる）
-          dbg('jump bottom-pull at max (approx): 目標以外で最下部吸着 → 再照準試行', jump.key,
-            `st=${sc.scrollTop}`, `max=${clampMaxScroll(sc)}`);
-          jump.lastGuessAt = 0; // クールダウン bypass
-          if (tryGuessReaim(jump, sc, item, now, 'approx-bottom-pull')) return;
+          // ライブ再推定 or 保留して再発射（v0.10.13）
+          if (handleBottomPull(jump, sc, item, now, 'approx-bottom-pull')) return;
         }
         // 補正不要の位置に着いていた
         dbg('jump landed (no correction)', jump.key);
@@ -1310,12 +1365,10 @@
         return;
       }
       if (Math.abs(sc.scrollTop - (jump.targetScroll || sc.scrollTop)) <= 3) {
-        if (bottomPulledAtMax(jump, sc) && (jump.guesses || 0) < JUMP_MAX_GUESS) {
-          // 目標計算自体がクランプで max に吸着した疑い → ライブ再推定へ
-          dbg('jump bottom-pull at max (smooth): 目標以外で最下部吸着 → 再照準試行', jump.key,
-            `st=${sc.scrollTop}`, `max=${clampMaxScroll(sc)}`, `target=${jump.targetScroll}`);
-          jump.lastGuessAt = 0;
-          if (tryGuessReaim(jump, sc, item, now, 'smooth-bottom-pull')) return;
+        if (bottomPulledAtMax(jump, sc)) {
+          // 目標計算自体がクランプで max に吸着した疑い → 二段構え（v0.10.13）。
+          // guesses 残有無に関わらず通す（尽きていれば give up で明示打ち切り）
+          if (handleBottomPull(jump, sc, item, now, 'smooth-bottom-pull')) return;
         }
         dbg('jump finished', jump.key, `st=${sc.scrollTop}`);
         jump = null;
@@ -1667,6 +1720,7 @@
         reasserted: jump.reasserted, stallFixed: (jump.fixes || 0) > 0,
         fixes: jump.fixes || 0, reaimed: !!jump.reaimed,
         guesses: jump.guesses || 0,
+        pullRetries: jump.pullRetries || 0,
         targetScroll: jump.targetScroll, startScroll: jump.startScroll,
       }
       : null),

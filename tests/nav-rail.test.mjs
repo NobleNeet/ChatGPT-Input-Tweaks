@@ -1783,6 +1783,76 @@ function pressAlt(f, key, mods = {}) {
   f.dom.window.close();
 }
 
+{
+  // 26d) 実機ケース：崩壊フレームでアンカー推定まで新 max と一致して
+  //      LIVE 再照準が「already close」で空振り → 保留して jumpTo を
+  //      まるごと再発射（v0.10.13）。予約は 1 度だけ二重発火しない。
+  const f = loadNav();
+  const calls = mountWith(f, 28500, 1322, [
+    { turnKey: 'T1', answers: [{ msg: 'M1', text: '回答一' }] },
+    { turnKey: 'T2', answers: [{ msg: 'M2', text: '回答二' }] },
+    { turnKey: 'T3', answers: [{ msg: 'M3', text: '回答三' }] },
+    { turnKey: 'T4', answers: [{ msg: 'M4', text: '回答四' }] },
+  ]);
+  const unitOf = (tk) => f.doc.querySelector(`[data-turn-key="${tk}"] [data-content-search-unit-key]`);
+  const turnElOf = (tk) => f.doc.querySelector(`[data-turn-key="${tk}"]`).closest('[data-virtualized-turn]');
+  stubRect(unitOf('T1'), 400, 60); stubRect(unitOf('T2'), 7600, 60);
+  stubRect(unitOf('T3'), 14800, 60); stubRect(unitOf('T4'), 21000, 60);
+  stubHeight(turnElOf('T1'), 6000); stubHeight(turnElOf('T2'), 7000);
+  stubHeight(turnElOf('T3'), 6000); stubHeight(turnElOf('T4'), 6000);
+  stubRect(turnElOf('T2'), 15000); // 発射時 anchor: abs=15000 → base=22012（新max超え）
+  f.nav.scan();
+  const off = f.nav.internals.topOffset();
+  const k3 = f.nav.snapshot().items.find((i) => i.turnKey === 'T3').key;
+  const t3turn = turnElOf('T3');
+  t3turn.remove();
+  f.nav.scan();
+
+  const realNow = f.w.Date.now();
+  f.w.Date.now = () => realNow;
+  f.nav.jumpTo(k3); // approx 発射
+  check('26d approx 発射済み', f.nav.jumpState() && f.nav.jumpState().phase === 'approx');
+
+  // 崩壊フレーム：st==max、T3 再レンダリ、T2 anchor abs=9600 →
+  // base=9600+7000+12=16612 → est=clampTop(16612-off)=16469==st で re-aim 空振り
+  const sc = f.doc.getElementById('scroller');
+  Object.defineProperty(sc, 'scrollHeight', { configurable: true, value: 17791 });
+  sc.scrollTop = 16469;
+  const transcriptEl = f.doc.querySelector('[data-rail-chat-transcript="true"]');
+  transcriptEl.appendChild(t3turn);
+  stubRect(unitOf('T3'), off); // desired = st
+  stubRect(turnElOf('T2'), 9600 - 16469); // abs = 9600
+  f.w.Date.now = () => realNow + 300;
+  f.nav.highlight();
+  check('26d 誤着地せず・再発射予約 #1', f.nav.jumpState() !== null &&
+    f.nav.jumpState().pullRetries === 1 && f.nav.log().includes('再発射予約 #1'),
+    JSON.stringify(f.nav.jumpState()));
+  check('26d re-aim は空振り（guesses 消費なし）',
+    f.nav.jumpState() && f.nav.jumpState().guesses === 0, JSON.stringify(f.nav.jumpState()));
+  // 保留中に pump しても予約は二重発火しない
+  f.w.Date.now = () => realNow + 400;
+  f.nav.highlight();
+  check('26d 保留中は予約が増えない', f.nav.jumpState() !== null &&
+    f.nav.jumpState().pullRetries === 1 &&
+    (f.nav.log().match(/再発射予約/g) || []).length === 1, '');
+
+  // 保留 → 実タイマーで #1 再発射。jsdom ではフレームが復元しないため
+  // 再発射後も pull が続き、#2 予約 → 予算切れで「明示的 give up」する。
+  // 黙って max に「landed/finished」しないことが重要。
+  await sleep(1000);
+  const dlog = f.nav.log();
+  check('26d #1 再発射実行（jumpTo 再実行）', dlog.includes('再発射 #1'), '');
+  check('26d frozen frame: #2 予約まで進む', dlog.includes('再発射予約 #2'), '');
+  check('26d 予算切れで give up ログ（silent finish なし）',
+    dlog.includes('give up at bottom-pull') &&
+      !dlog.includes('jump landed (no correction)') &&
+      !dlog.includes('jump finished'), '');
+  check('26d 打ち切り後 jump 無し', f.nav.jumpState() === null,
+    JSON.stringify(f.nav.jumpState()));
+  f.w.Date.now = () => realNow;
+  f.dom.window.close();
+}
+
 // ---- 結果 ---------------------------------------------------------------
 
 let failed = 0;
