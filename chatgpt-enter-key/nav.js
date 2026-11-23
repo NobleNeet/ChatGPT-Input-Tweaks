@@ -31,7 +31,7 @@
 
   // ---- 定数 --------------------------------------------------------------
 
-  const NAV_VERSION = '0.10.13';
+  const NAV_VERSION = '0.10.14';
   const LOG_TAG = '[ChatGPT Nav]';
   const LOG_STORAGE_KEY = 'chatgptNavLogLevel';
 
@@ -60,6 +60,12 @@
   const JUMP_REASSERT_WINDOW_MS = 1200;
   const JUMP_REASSERT_MIN_WAIT_MS = 60; // smooth/scroll 発射直後の一瞬は除外
   const JUMP_SNAP_TOL = 4;            // 「最下部に居る」判定の誤差 [px]
+
+  // v0.10.14: Alt+↑ で「表示中の回答の冒頭がまだ画面外（アンカーラインより上）」
+  // のとき、1つ前ではなくその回答自身の冒頭を目標にする。この「冒頭が
+  // 見えている」判定の許容誤差 [px]（着地位置がアンカーライン ± これ
+  // 以内なら冒頭に見えている扱い）
+  const JUMP_CURRENT_TOP_TOL = 12;
 
   // v0.10.13: 下端 pull 検知後、アンカー推定も max と一致して打つ手が
   // 無いとき、少し待ってから jumpTo をまるごと再発射する（手動で
@@ -1560,13 +1566,38 @@
    *   prev ＝ ビューポート上端より上に記録開始がある最後の回答
    *   next ＝ ビューポート下端より下に記録開始がある最初の回答
    * 端（隣が無い）は折返しせず null（＝no-op）。
+   * v0.10.14: prev で基準回答の冒頭がアンカーラインより上（画面外）なら、
+   * 1つ前ではなく基準回答自身の冒頭を返す（読み途中から「まず冒頭へ」）。
    */
+  /**
+   * v0.10.14: 回答の冒頭が現在アンカーラインより上（＝画面外かヘッダーに
+   * 隠れている）かどうか。長い回答の途中を読んでいて冒頭が見えないとき、
+   * Alt+↑ の目標を「1つ前」でなく「その回答自身（の冒頭）」にする判定。
+   * DOM 在位ならライブ実測、無ければ記録位置（scrollPosition）で近似する。
+   * 既に冒頭見え位置（± JUMP_CURRENT_TOP_TOL）なら false → 通常どおり 1つ前へ。
+   */
+  function topAboveAnchor(item) {
+    if (!item) return false;
+    const sc = getScroller();
+    if (!sc) return false;
+    const line = sc.scrollTop + topOffset();
+    if (item.inDOM && item.el && item.el.isConnected) {
+      const scrRect = sc.getBoundingClientRect();
+      const abs = item.el.getBoundingClientRect().top - scrRect.top + sc.scrollTop;
+      return abs < line - JUMP_CURRENT_TOP_TOL;
+    }
+    const p = item.scrollPosition;
+    if (!Number.isFinite(p)) return false;
+    return p < line - JUMP_CURRENT_TOP_TOL;
+  }
+
   function neighborKey(dir) {
     if (!items.length) return null;
     const baseKey = (jump && jump.key) || activeKey;
     if (baseKey) {
       const idx = items.findIndex((it) => it.key === baseKey);
       if (idx >= 0) {
+        if (dir === 'prev' && topAboveAnchor(items[idx])) return baseKey;
         const nb = dir === 'prev' ? items[idx - 1] : items[idx + 1];
         return nb ? nb.key : null;
       }
@@ -1613,7 +1644,10 @@
       return;
     }
     const idx = items.findIndex((it) => it.key === key);
-    dbg('shortcut jump', dir, `idx=${idx}`, `key=${key}`, `from=${activeKey}`);
+    const baseKey = (jump && jump.key) || activeKey;
+    const selfTop = dir === 'prev' && key === baseKey;
+    dbg('shortcut jump', dir, `idx=${idx}`, `key=${key}`, `from=${activeKey}`,
+      selfTop ? '(self top: 冒頭が画面外→自身の冒頭へ)' : '');
     jumpTo(key);
   }
 

@@ -1562,8 +1562,18 @@ function pressAlt(f, key, mods = {}) {
   f.nav.scan();
   const [k1, , k3] = snapItems(f.nav).map((i) => i.key);
   check('25b active は T1（先頭）', f.nav.highlight() === k1);
+  // v0.10.14: 冒頭がアンカーラインより上（ヘッダー下）なら Alt+↑ は
+  // no-op でなく「自身の冒頭への揃え」になる
   pressAlt(f, 'ArrowUp', { altKey: true });
-  check('先頭で Alt+↑ は no-op', f.nav.jumpState() === null, JSON.stringify(f.nav.jumpState()));
+  check('v0.10.14: 冒頭がヘッダー隠れなら自身の冒頭へ揃える',
+    f.nav.jumpState() && f.nav.jumpState().key === k1, JSON.stringify(f.nav.jumpState()));
+  pressAlt(f, 'PageUp'); // ジャンプ中断
+  const offB = f.nav.internals.topOffset();
+  stubRect(unitOf('T1'), offB); // T1 冒頭がちょうどアンカーライン（見えている扱い）
+  check('25b 揃え後 active は T1', f.nav.highlight() === k1);
+  pressAlt(f, 'ArrowUp', { altKey: true });
+  check('先頭で冒頭見えなら Alt+↑ は no-op（折返しなし）',
+    f.nav.jumpState() === null, JSON.stringify(f.nav.jumpState()));
 
   stubRect(unitOf('T1'), -2200);
   stubRect(unitOf('T2'), -1200);
@@ -1850,6 +1860,93 @@ function pressAlt(f, key, mods = {}) {
   check('26d 打ち切り後 jump 無し', f.nav.jumpState() === null,
     JSON.stringify(f.nav.jumpState()));
   f.w.Date.now = () => realNow;
+  f.dom.window.close();
+}
+
+// ======================================================================
+// 27) v0.10.14: 長い回答の途中（冒頭が画面外）で Alt+↑ → 1つ前ではなく
+//     その回答自身の冒頭へ。
+// ======================================================================
+{
+  // 27a) inDOM で冒頭がアンカーラインより上 → prev は自分自身を目標化
+  const f = loadNav();
+  mountWith(f, 12000, 1322, [
+    { turnKey: 'T1', answers: [{ msg: 'M1', text: '回答一' }] },
+    { turnKey: 'T2', answers: [{ msg: 'M2', text: '回答二' }] },
+    { turnKey: 'T3', answers: [{ msg: 'M3', text: '回答三' }] },
+  ]);
+  const unitOf = (tk) => f.doc.querySelector(`[data-turn-key="${tk}"] [data-content-search-unit-key]`);
+  f.doc.getElementById('scroller').scrollTop = 5000;
+  stubRect(unitOf('T1'), -4200); // abs 800
+  stubRect(unitOf('T2'), -300);  // abs 4700 ＝基準線(5115.2)より上＝冒頭画面外
+  stubRect(unitOf('T3'), 900);   // abs 5900
+  f.nav.scan();
+  const off = f.nav.internals.topOffset();
+  const [k1, k2, k3] = snapItems(f.nav).map((i) => i.key);
+  void k1;
+  check('27a active は T2（途中閲覧中）', f.nav.highlight() === k2, String(f.nav.highlight()));
+  pressAlt(f, 'ArrowUp', { altKey: true });
+  const js27 = f.nav.jumpState();
+  check('27a prev → 1つ前でなく T2 自身', js27 && js27.key === k2, JSON.stringify(js27));
+  check('27a target = 冒頭-off', js27 && Math.abs(js27.targetScroll - (4700 - off)) <= 0.01,
+    JSON.stringify(js27));
+  check('27a self top ログが出る', f.nav.log().includes('self top'), '');
+  // next は従来通り 1つ下
+  pressAlt(f, 'ArrowDown', { altKey: true });
+  check('27a next は従来通り T3', f.nav.jumpState() && f.nav.jumpState().key === k3,
+    JSON.stringify(f.nav.jumpState()));
+  f.dom.window.close();
+}
+{
+  // 27b) 冒頭が見えている位置（rel==off）なら prev は従来通り 1つ上
+  const f = loadNav();
+  mountWith(f, 12000, 1322, [
+    { turnKey: 'T1', answers: [{ msg: 'M1', text: '回答一' }] },
+    { turnKey: 'T2', answers: [{ msg: 'M2', text: '回答二' }] },
+    { turnKey: 'T3', answers: [{ msg: 'M3', text: '回答三' }] },
+  ]);
+  const unitOf = (tk) => f.doc.querySelector(`[data-turn-key="${tk}"] [data-content-search-unit-key]`);
+  f.doc.getElementById('scroller').scrollTop = 5000;
+  const off = f.nav.internals.topOffset();
+  stubRect(unitOf('T1'), -4200);
+  stubRect(unitOf('T2'), off); // 冒頭がちょうど基準線＝見えている
+  stubRect(unitOf('T3'), 900);
+  f.nav.scan();
+  const [k1, k2] = snapItems(f.nav).map((i) => i.key);
+  check('27b active は T2', f.nav.highlight() === k2, String(f.nav.highlight()));
+  pressAlt(f, 'ArrowUp', { altKey: true });
+  check('27b 冒頭見えなら prev は従来通り T1',
+    f.nav.jumpState() && f.nav.jumpState().key === k1, JSON.stringify(f.nav.jumpState()));
+  f.dom.window.close();
+}
+{
+  // 27c) キャッシュのみ回答で記録冒頭が基準線より上 → prev は自分自身
+  const f = loadNav();
+  mountWith(f, 12000, 1322, [
+    { turnKey: 'T1', answers: [{ msg: 'M1', text: '回答一' }] },
+    { turnKey: 'T2', answers: [{ msg: 'M2', text: '回答二' }] },
+    { turnKey: 'T3', answers: [{ msg: 'M3', text: '回答三' }] },
+  ]);
+  const unitOf = (tk) => f.doc.querySelector(`[data-turn-key="${tk}"] [data-content-search-unit-key]`);
+  const turnElOf = (tk) => f.doc.querySelector(`[data-turn-key="${tk}"]`).closest('[data-virtualized-turn]');
+  f.doc.getElementById('scroller').scrollTop = 5000;
+  stubRect(unitOf('T1'), -4200); // abs 800
+  stubRect(unitOf('T2'), -300);  // abs 4700
+  stubRect(unitOf('T3'), 900);   // abs 5900
+  f.nav.scan();
+  f.nav.highlight(); // 在位中に scrollPosition をキャッシュへ焼き付ける
+  const [k1, k2, k3] = snapItems(f.nav).map((i) => i.key);
+  void k1; void k3;
+  // T1/T2 を仮想化で DOM から消す（記録位置は 800/4700 のまま）
+  turnElOf('T1').remove();
+  turnElOf('T2').remove();
+  f.nav.scan();
+  check('27c T2 は cache-only', !f.nav.snapshot().items.find((i) => i.turnKey === 'T2').inDOM);
+  check('27c active は cache 補完で T2', f.nav.highlight() === k2, String(f.nav.highlight()));
+  pressAlt(f, 'ArrowUp', { altKey: true });
+  check('27c prev → 1つ前でなく cache-only T2 自身',
+    f.nav.jumpState() && f.nav.jumpState().key === k2, JSON.stringify(f.nav.jumpState()));
+  check('27c self top ログ', f.nav.log().includes('self top'), '');
   f.dom.window.close();
 }
 
