@@ -1624,6 +1624,165 @@ function pressAlt(f, key, mods = {}) {
   f.dom.window.close();
 }
 
+// ======================================================================
+// 26) v0.10.12: 下方向ジャンプ後の「最下部拉致（bottom-pull）」検知
+//     ChatGPT の仮想化崩壊フレームで st が新 max に吸着すると、
+//     クランプされた desired == st が成立して「 landed (no correction)」
+//     誤判定 → 直後に最新回答へ引きずられる（実測の「どの位置からでも
+//     最新へ」症状）。目標が最新（items 末尾）でなければ再照準する。
+// ======================================================================
+{
+  // 26a) approx 着地チェックで st==新max かつ目標は末尾以外 → 再照準発射
+  const f = loadNav();
+  const calls = mountWith(f, 28500, 1322, [
+    { turnKey: 'T1', answers: [{ msg: 'M1', text: '回答一' }] },
+    { turnKey: 'T2', answers: [{ msg: 'M2', text: '回答二' }] },
+    { turnKey: 'T3', answers: [{ msg: 'M3', text: '回答三' }] },
+    { turnKey: 'T4', answers: [{ msg: 'M4', text: '回答四' }] },
+  ]);
+  const unitOf = (tk) => f.doc.querySelector(`[data-turn-key="${tk}"] [data-content-search-unit-key]`);
+  const turnElOf = (tk) => f.doc.querySelector(`[data-turn-key="${tk}"]`).closest('[data-virtualized-turn]');
+  stubRect(unitOf('T1'), 400, 60); stubRect(unitOf('T2'), 7600, 60);
+  stubRect(unitOf('T3'), 14800, 60); stubRect(unitOf('T4'), 21000, 60);
+  stubHeight(turnElOf('T1'), 6000); stubHeight(turnElOf('T2'), 7000);
+  stubHeight(turnElOf('T3'), 6000); stubHeight(turnElOf('T4'), 6000);
+  stubRect(turnElOf('T2'), 15000); // 発射時 anchor: abs=15000 → base=22012（新max超え）
+  f.nav.scan();
+  const off = f.nav.internals.topOffset();
+  const k3 = f.nav.snapshot().items.find((i) => i.turnKey === 'T3').key;
+  const k4 = f.nav.snapshot().items.find((i) => i.turnKey === 'T4').key;
+  void k4;
+
+  // 実機同様に T3 は下方向 cache-only で発射
+  const t3turn = turnElOf('T3');
+  t3turn.remove();
+  f.nav.scan();
+  check('26a 目標 T3 は cache-only', !f.nav.snapshot().items.find((i) => i.turnKey === 'T3').inDOM);
+
+  const realNow = f.w.Date.now();
+  f.w.Date.now = () => realNow;
+  f.nav.jumpTo(k3);
+  check('26a approx 発射済み', f.nav.jumpState() && f.nav.jumpState().phase === 'approx');
+
+  // 仮想化崩壊＋最下部拉致シミュレーション：
+  //   sh 28500→17791、新 max=16469 に st 吸着、T3 再レンダリング済みで
+  //   abs = max+off（= desired クランプ値が st と一致してしまう）
+  const sc = f.doc.getElementById('scroller');
+  Object.defineProperty(sc, 'scrollHeight', { configurable: true, value: 17791 });
+  sc.scrollTop = 16469;
+  const transcriptEl = f.doc.querySelector('[data-rail-chat-transcript="true"]');
+  transcriptEl.appendChild(t3turn);
+  stubRect(unitOf('T3'), off); // abs = st+off → 新フレームで desired は st==max と一致する
+  // 再照準の材料：T2 anchor が live で abs=9000 → base=9000+7000+12=16012
+  stubRect(turnElOf('T2'), 9000 - sc.scrollTop);
+  f.w.Date.now = () => realNow + 300;
+  f.nav.highlight();
+  check('26a 誤着地せずジャンプ生存', f.nav.jumpState() !== null, JSON.stringify(f.nav.jumpState()));
+  check('26a bottom-pull 検知ログ', f.nav.log().includes('bottom-pull'), '');
+  check('26a ライトタグは approx-bottom-pull', f.nav.log().includes('approx-bottom-pull'), '');
+  const reaim = calls[calls.length - 1];
+  check('26a 再照準が anchor 推定 16012-off へ auto 発射',
+    reaim && reaim.behavior === 'auto' && Math.abs(reaim.top - (16012 - off)) <= 0.01,
+    JSON.stringify(calls));
+  const js = f.nav.jumpState();
+  check('26a guesses 予算を消費（fixes ではない）',
+    js && js.guesses === 1 && js.fixes === 0, JSON.stringify(js));
+  check('26a 「landed (no correction)」が出ていない',
+    !f.nav.log().includes('landed (no correction)'), '');
+  f.w.Date.now = () => realNow;
+  f.dom.window.close();
+}
+{
+  // 26b) 目標が最新回答（items 末尾）なら max 着地は正しいので着地させる
+  const f = loadNav();
+  const calls = mountWith(f, 28500, 1322, [
+    { turnKey: 'T1', answers: [{ msg: 'M1', text: '回答一' }] },
+    { turnKey: 'T2', answers: [{ msg: 'M2', text: '回答二' }] },
+    { turnKey: 'T3', answers: [{ msg: 'M3', text: '回答三' }] },
+    { turnKey: 'T4', answers: [{ msg: 'M4', text: '回答四' }] },
+  ]);
+  const unitOf = (tk) => f.doc.querySelector(`[data-turn-key="${tk}"] [data-content-search-unit-key]`);
+  const turnElOf = (tk) => f.doc.querySelector(`[data-turn-key="${tk}"]`).closest('[data-virtualized-turn]');
+  stubRect(unitOf('T1'), 400, 60); stubRect(unitOf('T2'), 7600, 60);
+  stubRect(unitOf('T3'), 14800, 60); stubRect(unitOf('T4'), 21000, 60);
+  stubHeight(turnElOf('T1'), 6000); stubHeight(turnElOf('T2'), 7000);
+  stubHeight(turnElOf('T3'), 6000); stubHeight(turnElOf('T4'), 6000);
+  f.nav.scan();
+  const off = f.nav.internals.topOffset();
+  const k4 = f.nav.snapshot().items.find((i) => i.turnKey === 'T4').key;
+
+  const t4turn = turnElOf('T4');
+  t4turn.remove();
+  f.nav.scan();
+  // 発射時に「新 max == 目標」になるような anchor を置いておく
+  stubRect(turnElOf('T3'), 10457); // abs=10457 + h6000 + 12 = 16469 = 新max
+  const realNow = f.w.Date.now();
+  f.w.Date.now = () => realNow;
+  f.nav.jumpTo(k4);
+  check('26b 末尾へ approx 発射', f.nav.jumpState() && f.nav.jumpState().key === k4 &&
+    f.nav.jumpState().phase === 'approx');
+  const sc = f.doc.getElementById('scroller');
+  Object.defineProperty(sc, 'scrollHeight', { configurable: true, value: 17791 });
+  sc.scrollTop = 16469;
+  const transcriptEl = f.doc.querySelector('[data-rail-chat-transcript="true"]');
+  transcriptEl.appendChild(t4turn);
+  stubRect(unitOf('T4'), off); // 末尾ターゲットが max+off の位置に再レンダされた状態
+  f.w.Date.now = () => realNow + 300;
+  f.nav.highlight();
+  check('26b 末尾ターゲットは max でも着地扱い（ジャンプ終了）', f.nav.jumpState() === null,
+    JSON.stringify(f.nav.jumpState()));
+  check('26b bottom-pull 検知しない', !f.nav.log().includes('bottom-pull'), '');
+  void calls;
+  f.w.Date.now = () => realNow;
+  f.dom.window.close();
+}
+{
+  // 26c) smooth 完了チェックでも同様に末尾以外が max 吸着なら再照準
+  const f = loadNav();
+  const calls = mountWith(f, 28500, 1322, [
+    { turnKey: 'T1', answers: [{ msg: 'M1', text: '回答一' }] },
+    { turnKey: 'T2', answers: [{ msg: 'M2', text: '回答二' }] },
+    { turnKey: 'T3', answers: [{ msg: 'M3', text: '回答三' }] },
+    { turnKey: 'T4', answers: [{ msg: 'M4', text: '回答四' }] },
+  ]);
+  const unitOf = (tk) => f.doc.querySelector(`[data-turn-key="${tk}"] [data-content-search-unit-key]`);
+  const turnElOf = (tk) => f.doc.querySelector(`[data-turn-key="${tk}"]`).closest('[data-virtualized-turn]');
+  stubRect(unitOf('T1'), 400, 60); stubRect(unitOf('T2'), 7600, 60);
+  stubRect(unitOf('T3'), 14800, 60); stubRect(unitOf('T4'), 21000, 60);
+  stubHeight(turnElOf('T1'), 6000); stubHeight(turnElOf('T2'), 7000);
+  stubHeight(turnElOf('T3'), 6000); stubHeight(turnElOf('T4'), 6000);
+  f.nav.scan();
+  const off = f.nav.internals.topOffset();
+  const k3 = f.nav.snapshot().items.find((i) => i.turnKey === 'T3').key;
+
+  const realNow = f.w.Date.now();
+  f.w.Date.now = () => realNow;
+  // 発射前に崩壊フレーム：T3 の live 位置が max+off でクランプされる並び
+  const sc = f.doc.getElementById('scroller');
+  Object.defineProperty(sc, 'scrollHeight', { configurable: true, value: 17791 });
+  sc.scrollTop = 12000;
+  stubRect(unitOf('T3'), 16469 + off - sc.scrollTop); // abs = max+off → target=max
+  f.nav.jumpTo(k3);
+  check('26c smooth 発射で target が max にクランプ',
+    f.nav.jumpState() && f.nav.jumpState().phase === 'smooth' &&
+      Math.abs(f.nav.jumpState().targetScroll - 16469) <= 0.01,
+    JSON.stringify(f.nav.jumpState()));
+  // st が max 吸着（飛行完了扱い）で pump
+  sc.scrollTop = 16469;
+  // 再照準材料：T2 anchor abs=9000
+  stubRect(turnElOf('T2'), 9000 - sc.scrollTop);
+  f.w.Date.now = () => realNow + 300;
+  f.nav.highlight();
+  check('26c smooth 側も誤完了せず再照準', f.nav.jumpState() !== null &&
+    f.nav.log().includes('smooth-bottom-pull'), JSON.stringify(f.nav.jumpState()));
+  const reaim = calls[calls.length - 1];
+  check('26c 再照準 auto 発射（16012-off）',
+    reaim && reaim.behavior === 'auto' && Math.abs(reaim.top - (16012 - off)) <= 0.01,
+    JSON.stringify(calls));
+  f.w.Date.now = () => realNow;
+  f.dom.window.close();
+}
+
 // ---- 結果 ---------------------------------------------------------------
 
 let failed = 0;

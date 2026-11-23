@@ -31,7 +31,7 @@
 
   // ---- 定数 --------------------------------------------------------------
 
-  const NAV_VERSION = '0.10.11';
+  const NAV_VERSION = '0.10.12';
   const LOG_TAG = '[ChatGPT Nav]';
   const LOG_STORAGE_KEY = 'chatgptNavLogLevel';
 
@@ -1124,6 +1124,23 @@
     return Math.abs(sc.scrollTop - j.startScroll) <= JUMP_STUCK_TOL;
   }
 
+  /**
+   * v0.10.12: 「目標が最新回答でないのにスクロールが最下部に吸着している」判定。
+   * ChatGPT の仮想化が崩壊フレームで上部を削ると、その瞬間だけ
+   * st == 新max == （クランプされた）目標位置 になり、着地誤判定が起こる。
+   * 直後 ChatGPT が下側コンテンツを再拡張して最新回答へ引き戻すため、
+   * 下方向ジャンプは「どの位置からでも最新回答へ」症状になる（実測）。
+   * 目標が最新回答（items 末尾）なら max 着地は正しいので例外。
+   */
+  function bottomPulledAtMax(j, sc) {
+    const max = clampMaxScroll(sc);
+    if (max <= 0) return false;
+    if (sc.scrollTop < max - JUMP_SNAP_TOL) return false;
+    const last = items.length ? items[items.length - 1] : null;
+    if (last && last.key === j.key) return false;
+    return true;
+  }
+
   /** マーカー行クリック → jumpTo。bar に対する委譲で、再生成された行でも効く */
   function onRowClick(key) {
     if (!key) {
@@ -1242,6 +1259,16 @@
       }
       const desired = clampTop(sc, absTop(sc, el) - topOffset());
       if (Math.abs(desired - sc.scrollTop) <= 3) {
+        if (bottomPulledAtMax(jump, sc)) {
+          // 最下部吸着なのに目標は最新以外 → 崩壊フレーム途中の誤着地。
+          // クールダウンを無視して LIVE アンカー再推定で re-aim を試みる。
+          // （アンカー推定が現在位置と一致するなら skip され、次 tick で
+          // 正しいフレームの値で再判定できる）
+          dbg('jump bottom-pull at max (approx): 目標以外で最下部吸着 → 再照準試行', jump.key,
+            `st=${sc.scrollTop}`, `max=${clampMaxScroll(sc)}`);
+          jump.lastGuessAt = 0; // クールダウン bypass
+          if (tryGuessReaim(jump, sc, item, now, 'approx-bottom-pull')) return;
+        }
         // 補正不要の位置に着いていた
         dbg('jump landed (no correction)', jump.key);
         jump = null;
@@ -1283,6 +1310,13 @@
         return;
       }
       if (Math.abs(sc.scrollTop - (jump.targetScroll || sc.scrollTop)) <= 3) {
+        if (bottomPulledAtMax(jump, sc) && (jump.guesses || 0) < JUMP_MAX_GUESS) {
+          // 目標計算自体がクランプで max に吸着した疑い → ライブ再推定へ
+          dbg('jump bottom-pull at max (smooth): 目標以外で最下部吸着 → 再照準試行', jump.key,
+            `st=${sc.scrollTop}`, `max=${clampMaxScroll(sc)}`, `target=${jump.targetScroll}`);
+          jump.lastGuessAt = 0;
+          if (tryGuessReaim(jump, sc, item, now, 'smooth-bottom-pull')) return;
+        }
         dbg('jump finished', jump.key, `st=${sc.scrollTop}`);
         jump = null;
         return;

@@ -467,6 +467,21 @@ jsdom に `isContentEditable` と `getClientRects()` の実装が無いため、
   - 追跡ログ強化：`src=rendered-anchor|rel`、`guess#N`、tick の `g=`、
     `baseSrc=`、keep-wait 時の `probeLive`（レンダリング中 turnKey 一覧）
   - jumpState() に `guesses` を追加
+- **下端 pull（max 吸着）の誤着地検知・再照準（v0.10.12）**: 下方向ジャンプで
+  「どの位置からでも最新回答へ突き落ちる」症状の真因は、approx の着地判定だった。
+  ChatGPT が上部 culling で scrollHeight を縮めると `st` が新 max に吸着し、
+  クランプ後の `desired == st == 新max` が成立して「 landed (no correction)」で
+  終了 → 直後の ChatGPT の再拡張で最新回答へ引きずられる。v0.10.9 までの
+  `suspiciousBottomSnap` は「古いフレームの targetScroll」を見るため、
+  target > 新max のこのケースでは発火しない（フレーム混在）。
+  - 着地判定の直前に `bottomPulledAtMax()` を追加：**st が max 吸着なのに
+    目標が items 末尾（最新回答）でない**なら誤着地として、クールダウンを
+    無視して LIVE アンカー再推定（`tryGuessReaim`、tag `approx-bottom-pull` /
+    `smooth-bottom-pull`）で再照準。guesses 予算（最大5）を消費する
+  - 目標が本当に末尾（最新）なら max 着地は正しいので従来通り着地させる
+  - smooth の完了チェックでも同じガードを通す（目標計算自体が max に
+    クランプされたケース対策）
+  - 自動テスト §26a/b/c で再現・担保
 
 ### 手動テスト項目（nav）
 
@@ -501,6 +516,10 @@ jsdom に `isContentEditable` と `getClientRects()` の実装が無いため、
       （オートリピート無視＝1回押して1ホップ。離して再度押すと次の回答へ）
 - [ ] （v0.10.11）`Alt+↑` を連打で遡るときも 1回=1回答ずつ移動する
       （素早い連打ならジャンプ先に追従して歩行を続ける）
+
+- [ ] （v0.10.12）`Alt+↓` で 1つ下の回答へ飛んだとき、最新回答まで
+      突き落ちず目的の回答冒頭に留まる（崩壊フレームで拉致されても
+      `bottom-pull` ログ→再照準で復帰）
 
 ### 診断
 
