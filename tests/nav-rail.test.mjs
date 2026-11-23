@@ -1950,6 +1950,53 @@ function pressAlt(f, key, mods = {}) {
   f.dom.window.close();
 }
 
+// ======================================================================
+// 28) v0.10.15: サイドバー SPA 切替直後の非同期レンダリングで
+//     「バーが1本だけ」で固まらない（再スキャン・バーストで自動回復）
+// ======================================================================
+{
+  const f = loadNav('https://chatgpt.com/c/one');
+  mountWith(f, 12000, 1322, [
+    { turnKey: 'T1', answers: [{ msg: 'M1', text: '回答一' }] },
+    { turnKey: 'T2', answers: [{ msg: 'M2', text: '回答二' }] },
+    { turnKey: 'T3', answers: [{ msg: 'M3', text: '回答三' }] },
+    { turnKey: 'T4', answers: [{ msg: 'M4', text: '回答四' }] },
+  ]);
+  f.nav.scan();
+  check('28 切替前 items=4', snapItems(f.nav).length === 4, String(snapItems(f.nav).length));
+
+  // 会話切り替え：URL 変化＋まだスケルトン（回答1件分）しか無い新会話
+  f.dom.window.history.pushState({}, '', '/c/two');
+  mountWith(f, 2000, 800, [{ turnKey: 'S1', answers: [{ msg: 'SM1', text: 'スケルトン' }] }]);
+  f.nav.scan();
+  check('28 切替直後は1件しか見えない（実測ケース）',
+    snapItems(f.nav).length === 1 && snapItems(f.nav)[0].turnKey === 'S1',
+    JSON.stringify(snapItems(f.nav).map((i) => i.turnKey)));
+  check('28 切替で resetAll が走った', f.nav.log().includes('resetAll'), '');
+
+  // 新会話ロード完了：transcript ノードごとまるごと入れ替わる
+  // ＝旧 observer の死角（切替後の body 置換は transcript 配下ではない）。
+  // 切替直後に見えていた S1 はそのまま最新回答として残り、
+  // 残りの回答が追記される（実 DOM 相当）。
+  mountWith(f, 12000, 1322, [
+    { turnKey: 'N1', answers: [{ msg: 'NM1', text: '新一' }] },
+    { turnKey: 'N2', answers: [{ msg: 'NM2', text: '新二' }] },
+    { turnKey: 'N3', answers: [{ msg: 'NM3', text: '新三' }] },
+    { turnKey: 'N4', answers: [{ msg: 'NM4', text: '新四' }] },
+    { turnKey: 'N5', answers: [{ msg: 'NM5', text: '新五' }] },
+    { turnKey: 'S1', answers: [{ msg: 'SM1', text: '最新' }] },
+  ]);
+  await sleep(1100); // burst #1(300ms)→新DOM確認済み、#2(900ms)まで待つ
+  check('28 burst 再スキャンで全文取り込み（F5 不要）',
+    snapItems(f.nav).length === 6, String(snapItems(f.nav).length));
+  check('28 rescan ログが残る', f.nav.log().includes('conversation rescan #2'), '');
+  const allNew = snapItems(f.nav).every((i) => /^N\d$/.test(i.turnKey) || i.turnKey === 'S1');
+  check('28 旧会話（T*）の混入なし', allNew, JSON.stringify(snapItems(f.nav).map((i) => i.turnKey)));
+  const s1 = snapItems(f.nav).find((i) => i.turnKey === 'S1');
+  check('28 最新回答 S1 は再出現で inDOM 復帰', !!s1 && s1.inDOM === true, JSON.stringify(s1));
+  f.dom.window.close();
+}
+
 // ---- 結果 ---------------------------------------------------------------
 
 let failed = 0;

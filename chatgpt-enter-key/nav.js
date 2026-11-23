@@ -31,7 +31,7 @@
 
   // ---- 定数 --------------------------------------------------------------
 
-  const NAV_VERSION = '0.10.14';
+  const NAV_VERSION = '0.10.15';
   const LOG_TAG = '[ChatGPT Nav]';
   const LOG_STORAGE_KEY = 'chatgptNavLogLevel';
 
@@ -435,17 +435,51 @@
       return;
     }
     logDebug('conversation switched', conversationId, '->', cid);
+    const to = cid;
     resetAll();
-    conversationId = cid;
+    conversationId = to;
+    startSwitchRescan(to);
+  }
+
+  // v0.10.15: 会話切り替え（サイドバー SPA）直後の再スキャン・バースト。
+  // 切り替え後 ChatGPT は新会話を非同期に取得・レンダリングするため、
+  // スケルトン（回答1件分だけ）で observer が付いたままになり、以降の
+  // 全文レンダリングが observer の死角（要素ごと差し替え等）で取り込まれず
+  // 「バーが1本だけ」で固まる（実測。F5 では正常）。通常 2s 間隔の保険巡回
+  // だけでは遅い/取りこぼすケースがあるため、短間隔で数回強制再走査し、
+  // その都度 transcript/observer も取り直す。各ステップの items 数もログに
+  // 残し、次回の実機ログで真因（スケルトン表示中 vs observer 死角）を
+  // 判別できるようにする。
+  const SWITCH_RESCAN_MS = [300, 900, 2000, 4000, 8000];
+  function startSwitchRescan(to) {
+    SWITCH_RESCAN_MS.forEach((d, i) => {
+      setTimeout(() => {
+        scanSafely();
+        dbg(`conversation rescan #${i + 1}`,
+          `conv=${to || 'null'}`, `items=${items.length}`,
+          `sc=${describeScroller(getScroller())}`,
+          `observed=${!!observedTranscript && observedTranscript === transcript}`);
+      }, d);
+    });
   }
 
   function resetAll() {
     dbg('resetAll (clears jump/cache)', `hadJump=${!!jump}`, `items=${items.length}`);
     items.length = 0;
     itemsByKey.clear();
+    turnHeights.clear(); // v0.10.15: 旧会話の自高キャッシュを新会話へ漏らさない
     activeKey = null;
     jump = null;
     cachedScroller = null;
+    // v0.10.15: 旧 transcript 参照と observer も完全に破棄。
+    // 次 scanNow / 再スキャンバーストで取り直す（取り残しで
+    // 「1本しか増えない」状態を追えない／直せないのを防ぐ）
+    transcript = null;
+    if (observer) {
+      try { observer.disconnect(); } catch (_) {}
+      observer = null;
+    }
+    observedTranscript = null;
     clearRows();
   }
 
@@ -1116,7 +1150,7 @@
     const max = clampMaxScroll(sc);
     if (max <= 0) return false;
     const clientH = sc.clientHeight || window.innerHeight || 800;
-    // 目标より1ビューポート以上下の「最下部」に今いる → 我々の意図に反する吸着
+    // 目標より1ビューポート以上下の「最下部」に今いる → 我々の意図に反する吸着
     return max - sc.scrollTop <= JUMP_SNAP_TOL && max - j.targetScroll > clientH;
   }
 
