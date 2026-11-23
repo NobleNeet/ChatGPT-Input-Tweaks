@@ -523,6 +523,18 @@ jsdom に `isContentEditable` と `getClientRects()` の実装が無いため、
   - 各ステップで `conversation rescan #N items=… sc=… observed=…` をログし、
     真因（スケルトン表示中か／observer 再アタッチ失敗か）を実機ログで判別可能に
   - 自動テスト §28（切替直後 1 件→1.1s 後に全文 6 件、旧会話混入なし）で担保
+- **旧 transcript 残存時の「表示中」優先（v0.10.16）**: v0.10.15 のバースト
+  でも実機で「バーが灰色のまま・items が旧会話のまま 8s 固まり `sc=none`」が
+  再現した。SPA 切替後に ChatGPT が**旧会話の transcript を DOM に非表示で
+  残したまま**新会話を別ブランチにマウントするケースがあり、`querySelector`
+  が DOM 順で先頭の旧（ゼロ寸法）を拾い続けていたとみられる。
+  - `findTranscript()`: マッチが複数あるとき「表示中（高さ>0 かつ
+    display:none / visibility:hidden でない）」の要素を優先。`display:
+    contents` の transcript は子の高さの最大値で実効高さを判定
+  - 再スキャンログに `tx=h=<高さ> dup=<マッチ数>` を追加し、
+    「旧残存（dup=2）」か「セレクタ陳腐化（dup=0）」かを実機で判別可能に
+  - 自動テスト §29（旧 display:none 残存＋新表示で新会話を拾い、
+    jump も効く）で担保
 
 ### 手動テスト項目（nav）
 
@@ -571,6 +583,9 @@ jsdom に `isContentEditable` と `getClientRects()` の実装が無いため、
 - [ ] （v0.10.15）サイドバーで別会話へ切り替えると、F5 なしで数秒以内に
       マーカーがその会話の回答数まで自動補充される（`conversation rescan #N`
       ログの `items=` が増えていくことを確認）
+- [ ] （v0.10.16）切り替え後に旧会話の要素が非表示で残っても、表示中の
+      新会話を拾ってバーが補充される（`conversation rescan` ログの
+      `tx=… dup=2` で旧残存を確認。バーが旧会話のまま灰色固定なら不可）
 
 ### 診断
 

@@ -122,7 +122,7 @@
   //     localStorage.setItem('chatgptEnterKeyLogLevel', 'off')     // 無音
   //   自己診断（セレクタが生きているか等）:
   //     document.dispatchEvent(new CustomEvent('chatgptEnterKeySelfTest'))
-  const VERSION = '0.10.15';
+  const VERSION = '0.10.16';
   const LOG_TAG = '[ChatGPT Enter Key]';
   const LOG_STORAGE_KEY = 'chatgptEnterKeyLogLevel';
   const SELF_TEST_EVENT = 'chatgptEnterKeySelfTest';

@@ -31,7 +31,7 @@
 
   // ---- 定数 --------------------------------------------------------------
 
-  const NAV_VERSION = '0.10.15';
+  const NAV_VERSION = '0.10.16';
   const LOG_TAG = '[ChatGPT Nav]';
   const LOG_STORAGE_KEY = 'chatgptNavLogLevel';
 
@@ -418,8 +418,35 @@
 
   // ---- スキャン（coalesce される本体） ------------------------------------
 
+  /** 表示高さ [px]。display:contents の場合は子の実効高さの最大値で代替する */
+  function elVisibleHeight(el) {
+    try {
+      const cs = window.getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden') return 0;
+      let h = el.getBoundingClientRect().height;
+      if (h <= 0 && cs.display === 'contents') {
+        for (const ch of el.children) {
+          const chh = elVisibleHeight(ch);
+          if (chh > h) h = chh;
+        }
+      }
+      return h;
+    } catch (_) { return 0; }
+  }
+
   function findTranscript() {
-    return document.querySelector(TRANSCRIPT_SELECTOR);
+    // v0.10.16: SPA 切り替え後、旧会話の transcript が非表示ブランチとして
+    // DOM に残ったまま、新会話が別の要素として別ブランチにマウントされる
+    // ことがある（実測: 切替後 items が旧会話のまま 8s 固まり sc=none）。
+    // 先頭マッチ＝旧を拾うとゼロ寸法ブランチに固定されるため、
+    // 「表示中（高さ>0）」の要素を優先して返す。
+    const all = document.querySelectorAll(TRANSCRIPT_SELECTOR);
+    if (!all || all.length === 0) return null;
+    if (all.length === 1) return all[0];
+    for (let i = 0; i < all.length; i++) {
+      if (elVisibleHeight(all[i]) > 0) return all[i];
+    }
+    return all[0];
   }
 
   /**
@@ -455,9 +482,16 @@
     SWITCH_RESCAN_MS.forEach((d, i) => {
       setTimeout(() => {
         scanSafely();
+        let tInfo = 'null';
+        if (transcript) {
+          const dup = document.querySelectorAll(TRANSCRIPT_SELECTOR).length;
+          const h = Math.round(transcript.getBoundingClientRect().height);
+          tInfo = `h=${h} dup=${dup}`;
+        }
         dbg(`conversation rescan #${i + 1}`,
           `conv=${to || 'null'}`, `items=${items.length}`,
           `sc=${describeScroller(getScroller())}`,
+          `tx=${tInfo}`,
           `observed=${!!observedTranscript && observedTranscript === transcript}`);
       }, d);
     });

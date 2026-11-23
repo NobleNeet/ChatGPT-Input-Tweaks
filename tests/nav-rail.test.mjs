@@ -1997,6 +1997,63 @@ function pressAlt(f, key, mods = {}) {
   f.dom.window.close();
 }
 
+// ======================================================================
+// 29) v0.10.16: SPA 切替後に旧会話の transcript が非表示で残存し、
+//     querySelector が旧（ゼロ寸法）を拾って items 不動・sc=none で
+//     固まるケース（「バーが灰色のまま」「Alt↑↓ が no-op」の実測）。
+//     findTranscript が「表示中」の transcript を優先すること。
+// ======================================================================
+{
+  const f = loadNav('https://chatgpt.com/c/old');
+  // 旧会話を通常マウス（#scroller > transcript）
+  mountWith(f, 8000, 800, [
+    { turnKey: 'T1', answers: [{ msg: 'M1', text: '旧一' }] },
+    { turnKey: 'T2', answers: [{ msg: 'M2', text: '旧二' }] },
+  ]);
+  f.nav.scan();
+  check('29 切替前 items=2（旧会話）',
+    snapItems(f.nav).length === 2 && snapItems(f.nav).every((i) => i.turnKey.startsWith('T')),
+    JSON.stringify(snapItems(f.nav).map((i) => i.turnKey)));
+
+  // 切替：URL 変化。ChatGPT が旧ツリーを display:none で残したまま
+  // 新会話を別ブランチ（#scroller_new > 新 transcript）にマウント。
+  // 旧が DOM 順で先頭なので querySelector だと旧のまま＝実測バグの再現。
+  f.dom.window.history.pushState({}, '', '/c/newconv');
+  const oldScroller = f.doc.getElementById('scroller');
+  oldScroller.style.display = 'none';
+  const newScroller = f.doc.createElement('div');
+  newScroller.id = 'scroller_new';
+  newScroller.innerHTML = transcriptHTML([
+    { turnKey: 'A1', answers: [{ msg: 'AM1', text: '新一' }] },
+    { turnKey: 'A2', answers: [{ msg: 'AM2', text: '新二' }] },
+    { turnKey: 'A3', answers: [{ msg: 'AM3', text: '新三' }] },
+  ]);
+  f.doc.body.appendChild(newScroller);
+  makeScroller(newScroller, { scrollHeight: 9000, clientHeight: 800 });
+  // 新 transcript だけ表示高さを持たせる（旧は jsdom 既定で高さ 0＝非表示扱い）
+  stubRect(newScroller.querySelector('[data-rail-chat-transcript="true"]'), 0, 9000);
+  const newUnits = newScroller.querySelectorAll('[data-content-search-unit-key]');
+  stubRect(newUnits[0], 300, 60);
+  stubRect(newUnits[1], 4500, 60);
+  stubRect(newUnits[2], 6000, 60);
+  f.nav.scan();
+  const keys = snapItems(f.nav).map((i) => i.turnKey);
+  check('29 旧非表示+新表示なら新会話を拾う',
+    keys.length === 3 && keys.every((k) => k.startsWith('A')),
+    JSON.stringify(keys));
+  check('29 旧 transcript の item は混在しない',
+    !keys.some((k) => k.startsWith('T')), JSON.stringify(keys));
+  await sleep(400); // burst 再スキャン #1 まで待つ
+  const logTxt = f.nav.log();
+  check('29 rescan で sc=none ではない',
+    logTxt.includes('conversation rescan #1') && !logTxt.includes('sc=none'), '');
+  // 動作確認: ショートカット相当の jump が新会話で効く
+  const a2 = snapItems(f.nav).find((i) => i.turnKey === 'A2');
+  const jumped = f.nav.jumpTo(a2.key);
+  check('29 新会話 item で jumpTo 成功', jumped === true, String(jumped));
+  f.dom.window.close();
+}
+
 // ---- 結果 ---------------------------------------------------------------
 
 let failed = 0;
